@@ -313,6 +313,16 @@ BACKEND_API_KEY = decouple_config("BACKEND_API_KEY")
 
 DEFAULT_FILE_STORAGE = "django.core.files.storage.FileSystemStorage"
 
+# Cloudflare R2 (S3-compatible object storage). USE_R2_STORAGE is an on/off
+# switch so the app still runs on local disk for anyone without R2
+# credentials configured. See utils/r2_storage.py for how this is used.
+USE_R2_STORAGE = decouple_config("USE_R2_STORAGE", default=False, cast=bool)
+R2_ACCESS_KEY_ID = decouple_config("R2_ACCESS_KEY_ID", default="")
+R2_SECRET_ACCESS_KEY = decouple_config("R2_SECRET_ACCESS_KEY", default="")
+R2_BUCKET_NAME = decouple_config("R2_BUCKET_NAME", default="")
+R2_ENDPOINT_URL = decouple_config("R2_ENDPOINT_URL", default="")
+R2_PUBLIC_BASE_URL = decouple_config("R2_PUBLIC_BASE_URL", default="")
+
 import socket
 
 hostname, _, ips = socket.gethostbyname_ex(socket.gethostname())

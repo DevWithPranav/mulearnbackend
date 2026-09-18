@@ -5,6 +5,7 @@ from django.db import models
 from decouple import config as decouple_config
 
 from db.organization import Organization
+from utils import r2_storage
 
 from django.conf import settings
 from .user import User
@@ -44,6 +45,11 @@ class InterestGroup(models.Model):
     # Legacy short emoji/code icon, superseded by the icon_image file upload
     # below. Kept nullable for backward compatibility with existing rows.
     icon = models.CharField(max_length=10, blank=True, null=True)
+    # R2 object keys for cover_image/icon_image below. NULL means no image
+    # uploaded since this migration shipped — see the properties' local-disk
+    # fallback for images uploaded before it.
+    cover_image_key = models.CharField(max_length=255, blank=True, null=True)
+    icon_image_key = models.CharField(max_length=255, blank=True, null=True)
     category =models.CharField(max_length=20,default="others",blank=False,null=False)
     status = models.CharField(
         max_length=20,
@@ -93,17 +99,26 @@ class InterestGroup(models.Model):
 
     @property
     def cover_image(self):
+        if self.cover_image_key:
+            return r2_storage.get_url(self.cover_image_key)
+        # Fallback for IGs whose image was uploaded before this migration
+        # existed — those files are still sitting on local disk under the
+        # old fixed path; existing files are not moved by this migration.
         fs = FileSystemStorage()
         path = f"interest_group/cover/{self.id}.png"
         if fs.exists(path):
             return f"{decouple_config('BE_DOMAIN_NAME')}{fs.url(path)}"
+        return None
 
     @property
     def icon_image(self):
+        if self.icon_image_key:
+            return r2_storage.get_url(self.icon_image_key)
         fs = FileSystemStorage()
         path = f"interest_group/icon/{self.id}.png"
         if fs.exists(path):
             return f"{decouple_config('BE_DOMAIN_NAME')}{fs.url(path)}"
+        return None
 
 
 class Level(models.Model):

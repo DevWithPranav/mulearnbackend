@@ -1,5 +1,3 @@
-from PIL import Image
-from django.core.files.storage import FileSystemStorage
 from django.db.models import Count
 from rest_framework.views import APIView
 from django.db import transaction
@@ -11,6 +9,7 @@ from utils.permission import JWTUtils, role_required
 from utils.response import CustomResponse
 from utils.types import RoleType, WebHookActions, WebHookCategory, InterestGroupStatus
 from utils.utils import CommonUtils, DiscordWebhooks
+from utils import r2_storage
 from .dash_ig_serializer import (
     InterestGroupSerializer,
     InterestGroupCreateUpdateSerializer,
@@ -67,41 +66,43 @@ def _validate_muids(request_data, fields=("leads", "mentors", "thinktank")):
     return True, None
 
 
-IG_IMAGE_MAX_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
+def _r2_module(image_type):
+    return "ig_cover" if image_type == "cover" else "ig_icon"
 
 
-def _ig_image_path(image_type, ig_id):
-    return f"interest_group/{image_type}/{ig_id}.png"
+def _key_field(image_type):
+    return "cover_image_key" if image_type == "cover" else "icon_image_key"
 
 
-def _validate_ig_image(image):
-    """Returns an error message string if `image` isn't an acceptable upload,
-    else None. content_type is client-supplied and spoofable, so the actual
-    bytes are decoded with Pillow rather than trusted at face value."""
-    if not image.content_type.startswith("image/"):
-        return "Expected an image file"
-
-    if image.size > IG_IMAGE_MAX_SIZE_BYTES:
-        return "Image must be under 5 MB"
-
-    try:
-        Image.open(image).verify()
-    except Exception:
-        return "Invalid or corrupted image file"
-    image.seek(0)
-
+def _validate_ig_image_key(key, image_type):
+    """
+    Returns an error message string if `key` isn't a key issued for this
+    image_type's module, else None. The file itself was already validated
+    and uploaded by POST /api/v1/media/upload/ — this just guards against a
+    key uploaded under one module being attached to a different one.
+    """
+    if not r2_storage.key_belongs_to_module(key, _r2_module(image_type)):
+        return "Key does not belong to this upload type"
     return None
 
 
-def _save_ig_image(image_type, ig_id, image):
-    fs = FileSystemStorage()
-    filename = _ig_image_path(image_type, ig_id)
-    # Must delete before save: FileSystemStorage.save() renames on collision
-    # (e.g. "<id>_abc123.png") instead of overwriting, which would desync the
-    # fixed path the cover_image/icon_image properties reconstruct.
-    if fs.exists(filename):
-        fs.delete(filename)
-    fs.save(filename, image)
+def _attach_ig_image_key(ig, image_type, key):
+    """
+    Points ig's cover_image_key/icon_image_key at a key already uploaded via
+    POST /api/v1/media/upload/, saves the row, and only deletes the previous
+    key's object (if any) after the database write succeeds — so a failed
+    save never leaves the row pointing at a deleted file.
+    """
+    field = _key_field(image_type)
+    old_key = getattr(ig, field)
+    if old_key == key:
+        return
+
+    setattr(ig, field, key)
+    ig.save(update_fields=[field])
+
+    if old_key:
+        r2_storage.delete(old_key)
 
 
 # " IGLead" — derived rather than hardcoded so it tracks IG_LEAD_ROLE().
@@ -143,12 +144,15 @@ def _can_manage_ig(roles, ig):
 
 class InterestGroupImageAPI(APIView):
     """
-    Upload/replace/remove an Interest Group's cover image or icon image.
+    Attach/replace/remove an Interest Group's cover image or icon image.
 
-    Mirrors the FileSystemStorage convention used for user profile cover
-    pics (profile_view.UserProfileCoverView) and impact project images
-    (impact_project_view.ImpactProjectImageAPI) — files live under
-    MEDIA_ROOT, not as a DB column, keyed by the IG's id.
+    The file itself is uploaded separately, first, via
+    POST /api/v1/media/upload/ (module="ig_cover"/"ig_icon") — this endpoint
+    only ever receives the resulting key, never raw file bytes, and points
+    InterestGroup.cover_image_key/icon_image_key at it (see
+    utils/r2_storage.py and db/task.py). IGs whose image was uploaded before
+    this migration existed still fall back to the old MEDIA_ROOT-relative
+    path via the cover_image/icon_image properties.
 
     `image_type` ("cover" or "icon") is bound per-URL via urls.py so the
     same view backs both <pk>/cover-image/ and <pk>/icon-image/.
@@ -160,7 +164,11 @@ class InterestGroupImageAPI(APIView):
 
     @extend_schema(
         tags=['Dashboard - Ig'],
-        description="Upload or replace an Interest Group's cover/icon image.",
+        description=(
+            "Attach or replace an Interest Group's cover/icon image. Expects "
+            "a 'key' field from a prior POST /api/v1/media/upload/ call, not "
+            "a raw file."
+        ),
     )
     def post(self, request, pk, image_type):
         roles = JWTUtils.fetch_role(request)
@@ -174,15 +182,15 @@ class InterestGroupImageAPI(APIView):
                 general_message="You do not have permission to manage this Interest Group"
             ).get_failure_response()
 
-        image = request.FILES.get("image")
-        if image is None:
-            return CustomResponse(general_message="No image provided").get_failure_response()
+        key = request.data.get("key")
+        if not key:
+            return CustomResponse(general_message="No key provided").get_failure_response()
 
-        error = _validate_ig_image(image)
+        error = _validate_ig_image_key(key, image_type)
         if error:
             return CustomResponse(general_message=error).get_failure_response()
 
-        _save_ig_image(image_type, ig.id, image)
+        _attach_ig_image_key(ig, image_type, key)
 
         return CustomResponse(
             response={self._field_name(image_type): getattr(ig, self._field_name(image_type))}
@@ -204,12 +212,14 @@ class InterestGroupImageAPI(APIView):
                 general_message="You do not have permission to manage this Interest Group"
             ).get_failure_response()
 
-        fs = FileSystemStorage()
-        filename = _ig_image_path(image_type, ig.id)
-        if not fs.exists(filename):
+        field = _key_field(image_type)
+        key = getattr(ig, field)
+        if not key:
             return CustomResponse(general_message="No image found").get_failure_response()
 
-        fs.delete(filename)
+        r2_storage.delete(key)
+        setattr(ig, field, None)
+        ig.save(update_fields=[field])
 
         return CustomResponse(general_message="Image removed successfully").get_success_response()
 
@@ -260,9 +270,9 @@ class InterestGroupAPI(APIView):
     @extend_schema(
         tags=['Dashboard - Ig'],
         description=(
-            "Create Interest Group. Accepts multipart/form-data with optional "
-            "'cover_image'/'icon_image' file fields to set both images in the "
-            "same request; JSON (no images) still works."
+            "Create Interest Group. Accepts optional 'cover_image'/'icon_image' "
+            "string fields — R2 keys from a prior POST /api/v1/media/upload/ "
+            "call, not raw files."
         ),
         request=InterestGroupCreateUpdateSerializer,
         responses={200: RoleDashboardSerializer},
@@ -277,13 +287,15 @@ class InterestGroupAPI(APIView):
         if not is_valid:
             return CustomResponse(general_message=error_msg).get_failure_response()
 
-        # Validate any inline images up front, before creating anything —
-        # a bad file must not leave a half-created IG behind.
-        cover_file = request.FILES.get("cover_image")
-        icon_file = request.FILES.get("icon_image")
-        for image in (cover_file, icon_file):
-            if image is not None:
-                error = _validate_ig_image(image)
+        # Validate any inline image keys up front, before creating anything —
+        # a bad key must not leave a half-created IG behind. The files
+        # themselves were already validated and uploaded by a prior call to
+        # POST /api/v1/media/upload/.
+        cover_key = request_data.get("cover_image")
+        icon_key = request_data.get("icon_image")
+        for image_type, key in (("cover", cover_key), ("icon", icon_key)):
+            if key:
+                error = _validate_ig_image_key(key, image_type)
                 if error:
                     return CustomResponse(general_message=error).get_failure_response()
 
@@ -313,10 +325,10 @@ class InterestGroupAPI(APIView):
             with transaction.atomic():
                 ig_instance = serializer.save()
 
-                if cover_file is not None:
-                    _save_ig_image("cover", ig_instance.id, cover_file)
-                if icon_file is not None:
-                    _save_ig_image("icon", ig_instance.id, icon_file)
+                if cover_key:
+                    _attach_ig_image_key(ig_instance, "cover", cover_key)
+                if icon_key:
+                    _attach_ig_image_key(ig_instance, "icon", icon_key)
 
                 ig_name = request_data.get("name")
                 ig_code = request_data.get("code")
@@ -359,9 +371,9 @@ class InterestGroupAPI(APIView):
             )
 
             response_data = dict(serializer.data)
-            if cover_file is not None:
+            if cover_key:
                 response_data["cover_image"] = ig_instance.cover_image
-            if icon_file is not None:
+            if icon_key:
                 response_data["icon_image"] = ig_instance.icon_image
 
             return CustomResponse(
@@ -920,9 +932,9 @@ class InterestGroupRequestAPI(APIView):
     @extend_schema(
         tags=['Dashboard - Ig'],
         description=(
-            "Create Interest Group Request. Accepts multipart/form-data with "
-            "optional 'cover_image'/'icon_image' file fields; JSON (no images) "
-            "still works."
+            "Create Interest Group Request. Accepts optional "
+            "'cover_image'/'icon_image' string fields — R2 keys from a prior "
+            "POST /api/v1/media/upload/ call, not raw files."
         ),
         request=InterestGroupRequestSerializer,
         responses={200: InterestGroupSerializer},
@@ -938,13 +950,15 @@ class InterestGroupRequestAPI(APIView):
         if not is_valid:
             return CustomResponse(general_message=error_msg).get_failure_response()
 
-        # Validate any inline images up front, before creating anything —
-        # a bad file must not leave a half-created request behind.
-        cover_file = request.FILES.get("cover_image")
-        icon_file = request.FILES.get("icon_image")
-        for image in (cover_file, icon_file):
-            if image is not None:
-                error = _validate_ig_image(image)
+        # Validate any inline image keys up front, before creating anything —
+        # a bad key must not leave a half-created request behind. The files
+        # themselves were already validated and uploaded by a prior call to
+        # POST /api/v1/media/upload/.
+        cover_key = request_data.get("cover_image")
+        icon_key = request_data.get("icon_image")
+        for image_type, key in (("cover", cover_key), ("icon", icon_key)):
+            if key:
+                error = _validate_ig_image_key(key, image_type)
                 if error:
                     return CustomResponse(general_message=error).get_failure_response()
 
@@ -972,10 +986,10 @@ class InterestGroupRequestAPI(APIView):
                 status="requested"
             )
 
-            if cover_file is not None:
-                _save_ig_image("cover", ig_instance.id, cover_file)
-            if icon_file is not None:
-                _save_ig_image("icon", ig_instance.id, icon_file)
+            if cover_key:
+                _attach_ig_image_key(ig_instance, "cover", cover_key)
+            if icon_key:
+                _attach_ig_image_key(ig_instance, "icon", icon_key)
 
             response_serializer = InterestGroupSerializer(ig_instance)
             
