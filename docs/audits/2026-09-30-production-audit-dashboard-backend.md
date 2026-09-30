@@ -1,86 +1,108 @@
-# muLearn Dashboard + Backend + Auth Server — Production Audit Report
+# muLearn Dashboard + Backend + Auth Server — Full Production Audit (every API, every page)
 
 | Item | Value |
 |---|---|
-| Date | 2026-09-30 (auth server section added the same day) |
+| Date | 2026-09-30 (second, exhaustive pass; replaces the first report of the same day) |
 | Dashboard repo / branch | `DevWithPranav/mulearn-dashboard` @ `dev` (`50c7052`, 2026-09-25) |
 | Backend repo / branch | `DevWithPranav/mulearnbackend` @ `pranav-dev` (`ad02b2a`, 2026-09-16) |
 | Backend comparison base | `dev` (`c4a8536`). `pranav-dev` is 194 commits ahead: 137 files, +11,525 / −3,752 lines |
 | Auth server repo / branch | `DevWithPranav/authserver` @ `dev` (`c749e90`, 2026-07-17). Unmerged branch `feat/new-auth` (`b790491`, 2026-09-24) was checked for fixes only |
-| Scope | Full regression + production audit, with focus on the dashboard ⇄ backend ⇄ auth server integration |
+| Scope | Full regression + production audit: **every backend endpoint (1,123 unique route + method pairs)**, **every dashboard page (129 pages)**, the auth server, and the integration between them |
+
+**How to read this report.** Issue IDs from the first report are kept (C-01…C-09, H-01…H-20, M-01…M-28, L-01…L-09) so earlier discussions still match. Everything found in this second pass continues the numbering: **C-10, H-21…H-35, M-29…M-59, L-10…L-55**. Section 5 and Appendix E list **every endpoint** with its access level, the roles that got through in testing, whether the dashboard uses it, any crash seen, and the issue IDs that apply. Section 7 and Appendix F list **every page** with what happened when it was opened as each role.
 
 ---
 
 ## How this audit was done
 
-1. **Backend route map.** Django was loaded with dummy settings and every URL pattern was listed through the real URL resolver: **733 URL patterns / 1,123 route + method pairs**.
-2. **Permission scan.** For every view and method, the scan recorded `permission_classes`, `authentication_classes` and any `role_required` / `RoleRequired` decorator. Results were then checked by hand, because many views check roles inside the method body.
-3. **Frontend endpoint map.** All **568 endpoint definitions** in `src/api/endpoints.ts` were run with placeholder values and resolved against the backend resolver.
-4. **Call-site check.** All **673 API call sites** (`apiClient` / `publicApiClient` / `serverApiClient` / `authedFetch`) were parsed. The HTTP method and URL of each call were checked against the resolved backend view. Result: **603 OK**, **11 no backend route**, **2 wrong HTTP method**, **57 built from variables** (checked by hand for the flows below).
-5. **Flow tracing.** Every important flow was read end to end: UI → API function → URL → backend view → auth/role → serializer → DB → response → UI handling.
-6. **Branch diff.** The `dev..pranav-dev` diff, the commit log and the backend route list of both branches were compared.
-7. **Dashboard checks run:** `typecheck` passes. `lint` passes (50 warnings). **Unit tests fail: 14 failed / 253 passed, 3 failing files** (see H-17).
-8. **Auth server review.** The whole `authserver` `dev` branch was read (`muauth/views.py`, `utils/views.py`, models, settings; about 1,800 lines). The auth server issues every JWT that the dashboard and backend trust. Its routes (`/api/v1/auth/user-authentication/`, `request-otp/`, `get-access-token/`, `logout/`, `signin-with-google/`, `google/login/callback/`, `google-mobile/`, `apple-mobile/`, `token-verification/<id>/`, `iedc-login/` …) are the ones the dashboard calls. `feat/new-auth` was only checked to see which findings it already fixes.
+**First pass (static + reading the code)**
+1. **Backend route map.** Django was loaded and every URL pattern was listed through the real resolver: **733 URL patterns (728 unique) / 1,123 unique route + method pairs**. The per-endpoint table has 1,140 rows because five URL patterns are declared twice in `urls.py` (Appendix B).
+2. **Permission scan** of every view method (`permission_classes`, `authentication_classes`, `role_required`, `RoleRequired`, in-body checks), then checked by hand.
+3. **Frontend endpoint map.** All **568 endpoint definitions** in `src/api/endpoints.ts` resolved against the backend.
+4. **Call-site check.** All **673 API call sites** parsed: **603 OK**, **11 no backend route**, **2 wrong HTTP method**, **57 built from variables** (checked by hand). This pass also found calls that "resolve" only because a literal path is swallowed by a `<str:…>` route (H-33).
+5. **Flow tracing, branch diff, auth-server read-through** (as in the first report).
 
-**Limits.** The backend and auth server were not run against a real MySQL database. Infra (Netlify, reverse proxy / nginx rules that send `/api/v1/auth/*` to the auth server, upload limits) is not in the repos. Where a finding depends on infra, the report says so.
+**Second pass (this report) — the code was run**
+6. **Static analysis of the whole backend:** `ruff` (undefined names, unused variables, duplicate imports), a check that every view method signature matches its URL parameters, and a check that every `ModelSerializer` builds and that every `source=` path exists on the model.
+7. **Dynamic API test harness.** All 136 backend tables were created in SQLite from the models, filled with generated data plus a hand-made scenario (colleges, a company, IGs, events, a learning circle with a live meeting, jobs, tasks, mentor grants). **19 test users**, one per role (anonymous, Student, Admin, Company, Mentor, Campus Lead, Enabler, Lead Enabler, IG Lead, Campus IG Lead, Intern, Intern Lead, Zonal Lead, District Lead, Fellow, Associate, Tech Team, Discord Moderator, Comic Admin), each with a signed JWT. **Every route and method was called as every role** (**21,660 requests**; writes used an empty body and every call was rolled back). Outbound HTTP (auth server, partners) was mocked. Every 500 was traced to a line of code and checked by hand; test-data artefacts were removed.
+8. **Targeted live tests** for the most serious findings (for example C-10, H-22, H-23, M-29, M-52) — each one is marked "verified" in its entry.
+9. **Browser crawl of the dashboard.** The dashboard was built (`next build` passes) and run against the local backend. **All 129 pages were opened** in headless Chromium as Anonymous, Student and Admin, and every role-specific page as the matching role (**781 page visits**). For each visit the crawl recorded redirects, JavaScript errors, React errors, failed or error API calls, and error text on screen. The first 176 visits ran in development mode, which also logs API schema mismatches.
+10. **Schema contract check.** For every dashboard GET call the live backend response was validated against the dashboard's own Zod schema (198 call sites checked).
+
+**Limits.** The backend ran on SQLite, not MySQL (MySQL-only behaviour — for example case-insensitive text matching — is called out where it matters). External services (auth server, partners, Razorpay, e-mail, Redis, Celery broker) were mocked or replaced in memory. Infra (Netlify, reverse proxy rules, upload limits) is not in the repos. Test data was generated, so some page content (names, numbers) is meaningless; only errors that were confirmed in the code are reported.
 
 ---
 
 ## 1. Executive summary
 
-The three branches **are not ready for production together**.
+The three branches **are not ready for production together.** The second pass ran the backend and the dashboard for real and found many more problems than reading the code alone showed.
 
-Most of the day-to-day wiring is correct: about 90% of the dashboard's API calls (603 of 673) reach an existing backend route with the right HTTP method. The remaining auth calls exist on the auth server. The response envelope (`hasError / statusCode / message / response`) is handled the same way everywhere. Recent work added good things too: company-owner job approval, event publish policy, atomic learning-circle lead transfer, and URL-scheme checks on events.
+**What works.** About 90% of the dashboard's API calls reach the right backend view with the right method. The production build of the dashboard passes (`next build`, typecheck). Most pages open without errors for the roles they are meant for. Recent backend work has good patterns (row locks on approvals, publish policy, denormalised aggregates).
 
-But the audit found problems in five areas that block a safe release:
+**What blocks a release (in plain words):**
 
-0. **Anyone can become an admin or log in as any user (auth server).** These are the most serious findings:
-   - The auth server puts **every** role link into the JWT, including roles that were requested but never approved. The backend lets anyone request any role at sign-up, including "Admins". So a new account gets full Admin power on its first login (C-09).
-   - The Apple mobile sign-in does not check the Apple token signature. Anyone can get tokens for **any user's email**, including admins (C-08).
-1. **Open admin actions on the backend (Security).** Some endpoints that change important data have no login check or no role check:
-   - Anyone on the internet can merge and **delete any organization** (`/organisation/transfer/`) and can **replace any user's profile picture**.
-   - Any logged-in learner can **create, grant and revoke achievements**, and can **approve organization requests**.
-   - The Launchpad admin API trusts an email address typed into the request body.
-2. **Broken cross-repo contracts.** Several flows look finished in the UI but cannot work against this backend:
-   - The admin announcement endpoint does not exist.
-   - Notification links and broadcasts are dropped by the new notification feed.
-   - Rejecting an org request always fails, and the org merge preview always fails.
-   - The mentor "accept session" button calls a GET-only endpoint with POST.
-   - The new Role Verification page sends filters the backend ignores.
-   - Company co-admin invites cannot be accepted, and mentor-created company jobs cannot be approved from the UI.
-3. **Deployment / regression risk on `pranav-dev`:**
-   - The campus co-lead refactor needs a DB migration (`alter-1.91.sql`) that is named in the commit message but **is not in the repo**.
-   - It also renames dynamic roles (`"{code} CampusLead"` → `"{code} CampusIGLead"`), which **the dashboard still checks under the old name**.
-   - Many other model changes (for example 12 new notification columns) have no migration scripts.
-4. **Business rules that can be abused or that lose data:**
-   - Learning-circle karma can be farmed with a join/leave loop.
-   - A campus event creator can approve their own event.
-   - Deleting an interest group cascades into karma history.
-   - The company sign-up flow **never uploads the verification document**. It sends a made-up URL instead, so admins verify companies against a document that does not exist.
+1. **Anyone can become powerful.**
+   - A new account can make itself Admin (C-09), and anyone can log in as any user through Apple sign-in (C-08) — both from the first report.
+   - **New:** any Intern can give themselves unlimited karma — verified: one request added 999,999 karma (C-10). Interns can also approve their own leave and deactivate the Intern Lead (H-21).
+   - **New:** a lead of a single interest group can make anyone a verified platform Mentor (H-24).
+   - **New:** any user can make themselves a verified member of any college or company, and a Campus Lead can "move" to another college with one call and manage it (H-23).
+2. **Private data is exposed.** **New:** one public endpoint returns the email and phone number of any user from their muID (H-22). Others leak student details or allow account enumeration (L-17, L-23, L-41, L-42).
+3. **Karma can be faked in many ways:** intern verification (C-10), event tasks edited after approval (H-25), learning-circle join/leave loops and forced members (H-10, M-43), junk social links (M-30), plus task deletion that silently wipes karma history (M-39).
+4. **Pages and APIs are broken today.**
+   - **Crash on load (browser crawl):** company Collaborations (H-30), Event Templates (H-31), Feedback & Impact (H-32).
+   - **Public pages do not work for visitors:** every shareable page (public profile, muJourney, interest groups, events, search) sends anonymous visitors to the login page (H-34).
+   - **Always fails:** invite-link page for learning circles (H-27), Dynamic Type admin page and Discord leaderboard (H-26, a regression from 2026-08-30), company co-admin status (H-33), all public learning-circle report APIs (H-28), Top-100 leaderboard (M-49), campus student list / member lists (M-47), hackathon organisers (M-53), registration with a wrong invite code (M-52).
+   - **Wrong numbers:** muJourney progress (M-29), home "open jobs" count (M-58), impact report (H-32).
+   - **Role mismatches between the dashboard and the backend** leave whole pages showing "You do not have the required role" for roles the dashboard lets in: intern pages for Intern Lead/Admin (M-54), manage-interns for Associate (M-38), zonal/district for Admin (M-55), career labs for Fellow (M-56), talent pool for non-companies (M-57).
+5. **Money records can be duplicated.** **New:** the donation verification endpoint can be replayed to create extra "paid" donations and extra tax receipts (H-29, M-44).
+6. **Deployment and data safety.** Missing DB migration scripts (C-06, H-16, first report). **New:** production runs Django's development server and nothing runs Celery beat, so none of the 10 scheduled jobs run — every college and learning circle shows 0 karma and rank 0, and events, jobs, grants and intern statuses never change on schedule (H-35, M-59). Destructive cascades on delete (H-11, M-39, L-38).
 
 ### Findings count
 
-| Severity | Count |
+| Severity | First report | Added in this pass | Total |
+|---|---|---|---|
+| Critical | 9 (C-01…C-09) | 1 (C-10) | **10** |
+| High | 19 (H-01…H-20, H-14 merged) | 15 (H-21…H-35) | **34** |
+| Medium | 28 (M-01…M-28) | 31 (M-29…M-59) | **59** |
+| Low | 9 (L-01…L-09) | 46 (L-10…L-55) | **55** |
+| **Total** | **65** | **93** | **158** |
+
+Plus the per-endpoint table (1,140 rows covering all 1,123 endpoints, Appendix E) and the per-page table (129 rows, Appendix F), which point every endpoint and page to its issues.
+
+### Automated results at a glance
+
+| Check | Result |
 |---|---|
-| Critical | 9 |
-| High | 19 |
-| Medium | 28 |
-| Low | 9 |
+| Backend endpoints (unique route + method pairs) | 1,123 (1,140 table rows; 5 URL patterns are declared twice) |
+| Endpoints the dashboard calls | 542 |
+| Endpoints with at least one issue ID | 428 |
+| Endpoints reachable with **no login** | 172 (44 of them change data) |
+| Endpoints that returned **HTTP 500** for at least one role in testing | 263 (173 are "wrong method on a shared URL" crashes, L-11 / Appendix H; 35 are anonymous calls that should be 401, L-10; 55 are other bugs, Appendix G) |
+| Dashboard pages | 129 (120 under `/dashboard`, 9 auth/onboarding/public) |
+| Page visits in the browser crawl | 781 (all pages × Anonymous/Student/Admin + each role's own pages) |
+| Pages with a crash, 500, role error or schema error for a role that is allowed on the page | 35 (plus 11 public pages that bounce visitors to login, H-34) |
+| Dashboard GET calls checked against live responses | 198 → 112 match, 17 schema mismatches (13 real, 4 caused by test data), 44 API errors (most from placeholder ids) |
+| `next build` / typecheck / lint / unit tests | ✅ / ✅ / ✅ (50 warnings) / ❌ 14 failing tests |
 
-### Top 10 to fix first
+### Top 15 to fix first
 
-| # | ID | Fix |
-|---|---|---|
-| 1 | C-09 | Auth server: only `verified=True` roles in tokens. Backend: only a short allowlist of roles can be requested at sign-up |
-| 2 | C-08 | Auth server: verify Apple identity tokens against Apple's public keys (already done on `feat/new-auth`; ship it), or turn off `apple-mobile/` now |
-| 3 | C-01 | Add auth + Admin role to `organisation/transfer/` (or remove it) |
-| 4 | C-03 | Profile picture upload: require auth, use the user id from the JWT |
-| 5 | C-02 | Add Admin role checks to all achievement admin endpoints |
-| 6 | C-04 | Launchpad: stop trusting `current_user` from the request body |
-| 7 | H-18 / H-19 | Backend: reject refresh tokens used as access tokens. Auth server: fix brute-force protection and remove the IEDC password oracle |
-| 8 | C-06 / C-07 | Commit and run the missing migration; update dashboard role suffix checks |
-| 9 | C-05 | Build a real file upload for company verification documents |
-| 10 | H-01 / H-04 / H-08 | Role checks on org verification; notification feed contract; upload size limit |
+| # | ID | What | Where |
+|---|---|---|---|
+| 1 | C-09 | Only verified roles in tokens; limit self-requested roles | Auth server + Backend |
+| 2 | C-08 | Verify Apple identity tokens | Auth server |
+| 3 | C-10, H-21 | Remove `Intern` from all manage-interns APIs; cap and block self-awarded karma | Backend |
+| 4 | H-18 | Accept only `tokenType == "access"` | Backend |
+| 5 | C-01…C-04, H-15, H-22 | Close the unauthenticated admin/PII endpoints | Backend |
+| 6 | H-23 | Stop self-verified org links; tie campus roles to their college | Backend |
+| 7 | H-24, M-37 | IG leads must not mint Mentors or change IG code/status | Backend |
+| 8 | H-25, H-10, M-43 | Karma integrity (event tasks, LC loops, forced members) | Backend |
+| 9 | C-06, H-16, H-35, M-59 | Commit and rehearse all DB migration scripts; run a real app server and Celery beat; register every scheduled task | Backend / infra |
+| 10 | H-29, M-44 | Make donation verification idempotent | Backend |
+| 11 | H-26 | Fix the pagination helper regression | Backend |
+| 12 | H-30…H-34 | Fix the broken company pages and the public pages | Dashboard + Backend |
+| 13 | H-27, H-28 | LC invite link page; public LC APIs | Backend |
+| 14 | C-07, M-38, M-54…M-57 | One shared role list for every page and its APIs | Both |
+| 15 | H-17 | Make CI run the test suites in all three repos | All |
 
 ---
 
@@ -280,6 +302,22 @@ But the audit found problems in five areas that block a safe release:
   - Backend: add an allowlist for self-requested roles in `UserSerializer`, and filter `verified=True, is_active=True` in `user/info`.
   - Check for accounts that already have unverified privileged role links and remove them.
 - **Impact.** Total loss of access control.
+
+### C-10 · Any Intern can give themselves unlimited karma (verified in a live test)
+| Field | Detail |
+|---|---|
+| Severity / Category | **Critical** · Security / Business Logic (karma integrity) |
+| Repo / branch | Backend @ `pranav-dev` |
+| Location | `api/dashboard/manage_interns/tasks/tasks_views.py:160` `ManageInternTaskVerifyAPI.post` (route `POST /api/v1/dashboard/manage-interns/tasks/<task_id>/verify/`). Related: interns can also approve their own timesheets and weekly reviews, which award fixed karma with streak multipliers and milestone bonuses (`manage_interns/reviews/review_views.py:224-300`, `:333-390`) |
+| Dependency | Dashboard `/dashboard/management/manage-interns/tasks` (the UI is only shown to Admin / Associate / Intern Lead, but the API is open to every Intern) |
+
+- **Problem.** The view allows the roles `Admin`, `Intern` and `Intern Lead`. It reads `karma_awarded` from the request body and only checks that it is not negative. There is no upper limit and no check that the caller is not verifying their own task. It then writes an approved `KarmaActivityLog` and adds the amount to the intern's `Wallet`.
+- **Why it matters.** Karma drives levels, leaderboards, campus rank and rewards. One intern can make themselves (or a friend) number one on every leaderboard in one request.
+- **Expected.** Only Intern Lead / Admin can verify. The karma comes from a fixed table (or has a small maximum). Nobody can verify their own task.
+- **Current.** Any Intern can verify any task, including their own, with any karma value.
+- **Reproduce (done in this audit).** As a plain Intern: create or pick an intern task assigned to yourself, then `POST /api/v1/dashboard/manage-interns/tasks/<id>/verify/` with `{"karma_awarded": 999999}`. Result in the test run: `200 "Task verified successfully"`, wallet **500 → 1,000,499**.
+- **Fix.** Change the role list to `[ADMIN, INTERN_LEAD]` on all manage-interns views (see H-21). Add a hard maximum (for example 100) and reject `task.assigned_to_id == caller`. Block self-approval of timesheets and weekly reviews. Add an audit report of all `#intern-task-verified` karma already awarded.
+- **Impact.** Leaderboards and levels can be faked; existing karma data may already be polluted.
 
 ---
 
@@ -561,6 +599,224 @@ This item was first marked "High, needs confirmation", because the auth server w
 - **Fix.** Log login attempts without the lookup (or enrich them later in a background job). Use a short timeout and catch all errors. Use the client IP from `X-Forwarded-For`, as `get_client_ip_address` already does.
 - **Impact.** An ipinfo.io outage takes down all logins.
 
+### H-21 · A plain "Intern" can use every intern-management API
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Security / RBAC |
+| Repo / branch | Backend @ `pranav-dev` |
+| Location | All views in `api/dashboard/manage_interns/` — `interns_views.py` (`ManageInternAPI` get/post/patch/delete), `tasks/tasks_views.py`, `reviews/review_views.py`, `leave/leave_views.py:56` (`patch` = approve/reject leave) — use `role_required([ADMIN, INTERN, INTERN_LEAD])` |
+| Dependency | Dashboard `/dashboard/management/manage-interns/*` (route-access allows Admin, Associate, Intern Lead — see M-38) |
+
+- **Problem.** The manage-interns APIs accept the normal `Intern` role. In the test run the Intern persona could update and deactivate other interns (`DELETE manage-interns/interns/<id>/` → "Intern deactivated successfully"; this also deletes the target's Intern / Intern Lead role links).
+- **Why it matters.** An intern can approve their own leave (the leave review has no "reviewer is not the requester" check), approve their own timesheets and weekly reviews (each approval awards karma), create and verify tasks (C-10), onboard new people as interns, and remove the Intern Lead.
+- **Expected / Current.** Admin + Intern Lead (+ Associate if that is the product decision) / every Intern.
+- **Reproduce.** Log in as an Intern → `PATCH /api/v1/dashboard/manage-interns/leave/<own_leave_id>/` with `{"action":"approve"}`.
+- **Fix.** Remove `RoleType.INTERN.value` from every `role_required` in `api/dashboard/manage_interns/**`. Block self-review (`leave.user_id != caller`). Keep the intern's own APIs under `api/dashboard/intern/**`.
+- **Impact.** The whole intern program (attendance, leave, reviews, karma) can be manipulated by interns.
+
+### H-22 · Anyone can read any user's email and phone number (no login needed)
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Security / Privacy (PII leak) |
+| Repo / branch | Backend @ `pranav-dev` |
+| Location | `api/register/register_views.py:304` `LearningCircleUserViewAPI.post` (route `POST /api/v1/register/lc/user-validation/`) |
+| Dependency | Not used by the dashboard (legacy helper) |
+
+- **Problem.** The view has no authentication. It reads a `muid` from the request **header** and returns the user's `id`, `muid`, full name, **email and phone**.
+- **Why it matters.** muIDs are public (leaderboards, profiles, search, LC member lists). Anyone can harvest emails and phone numbers of all users, including admins.
+- **Expected / Current.** Not public (or return only a yes/no) / full PII to anonymous callers.
+- **Reproduce (done).** `curl -X POST -H "muid: admin@mulearn" https://<api>/api/v1/register/lc/user-validation/` → `200 {"email": "...", "phone": "..."}`.
+- **Fix.** Delete the endpoint, or require `CustomizePermission` and return only `{"exists": true}`.
+- **Impact.** Mass PII exposure; phishing and SIM-swap risk for users; legal risk (DPDP Act).
+
+### H-23 · Any user can make themselves a verified member of any organization (and a Campus Lead can "move" to any college)
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Security / Business Logic |
+| Repo / branch | Backend @ `pranav-dev` |
+| Location | `api/dashboard/user/dash_user_views.py:557` `UserAddOrgAPI.post` + `dash_user_serializer.py:569` `UserOrgLinkSerializer.create` (sets `verified=True` for every org type; non-college orgs get a new duplicate row each call). Same effect through `PATCH /dashboard/college/change-college/` and `PATCH /dashboard/profile/` `communities` (M-31) |
+| Dependency | Dashboard onboarding (`features/onboarding/api/onboarding.api.ts:93`), profile "change college" (`features/profile/api/profile.api.ts:419`) |
+
+- **Problem.** The serializer accepts **any** `Organization` id (college, company, community) and stores the link as `verified=True`. The view has no auth class (it calls `JWTUtils` directly, so expired tokens also work, and anonymous calls crash with a 500).
+- **Why it matters.** Campus-scoped power is based on the caller's own college link: campus dashboards, campus event approval (`_is_active_campus_member`), student lists, campus IG chapters. Verified test: a Campus Lead called this API once with another college's id and the campus dashboard (`/campus/home-summary/`) immediately showed **the other college**. A learner could also link themselves as a verified member of a company org ("Test Co").
+- **Expected.** A college change should go through the same "unverified organization" review as new orgs, or at least keep campus roles tied to the college they were granted for. Company/community links should not be self-verified.
+- **Current.** One call, no review, immediately verified.
+- **Reproduce.** As a Campus Lead: `POST /api/v1/dashboard/user/organization/` `{"organization":"<other college id>"}` → `GET /api/v1/dashboard/campus/home-summary/` shows the other college.
+- **Fix.** Store `verified=False` for self-service links (except the first college at onboarding), and drop/suspend campus roles when the college changes. Only allow org types that make sense for the form (`College`/`School`). Add `authentication_classes = [CustomizePermission]`.
+- **Impact.** Campus leads and enablers can manage campuses they do not belong to; campus stats and leaderboards can be polluted.
+
+### H-24 · A per-IG lead can create verified Mentors and break IG roles through the IG edit API
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Security / RBAC |
+| Repo / branch | Backend @ `pranav-dev` |
+| Location | `api/dashboard/ig/dash_ig_view.py:634` `InterestGroupGetAPI.patch` (route `PATCH /api/v1/dashboard/ig/get/<pk>/`), mentor side-effect `:741-815`, lead side-effect `:686-739`; serializer `dash_ig_serializer.py:336` `InterestGroupCreateUpdateSerializer` (fields include `code`, `status`, `created_by`) |
+| Dependency | Dashboard `/dashboard/edit-ig/[id]` (`features/manage-ig`) — allowed for Admin, "IG Lead" and any "{code} IGLead" |
+
+- **Problem.**
+  1. For every muid in the `mentors` list, the view creates a `UserMentor` profile, an active `IG_MENTOR` scope grant, a **verified global "Mentor" role link**, and a mentor IG link. This skips the mentor application and admin approval flow completely. Removing a muid from the list never removes anything.
+  2. The same PATCH lets a per-IG lead change `code`, `name`, `status` and `created_by`. Only the PUT path renames the derived roles (`"{code} IGLead"`, `"{code} CampusIGLead"`, co-lead, execom catalog). Changing the code through PATCH orphans all of them, so every lead of that IG (including the caller) loses access.
+- **Why it matters.** A per-IG lead (a scoped, lower-trust role) can mint platform-wide Mentors, who then get the mentor dashboard, can create mentorship sessions and mentor tasks for that IG, and pass every `role_required([MENTOR])` check. A mistake in the edit form can also lock out every lead.
+- **Expected.** Mentor assignment goes through admin approval (or is limited to the IG scope, without the global role). `code`/`status` are admin-only fields.
+- **Reproduce.** As `WEBDEV IGLead`: `PATCH /api/v1/dashboard/ig/get/<webdev id>/` `{"mentors":[{"muid":"friend@mulearn"}]}` → the friend now has a verified "Mentor" role.
+- **Fix.** Remove the global Mentor role grant (keep only the IG scope grant, pending approval), revoke grants for removed muids, make `code`/`status`/`created_by` read-only for non-admins, and share the rename logic between PUT and PATCH (or block code changes in PATCH).
+- **Impact.** Privilege escalation; broken IG administration.
+
+### H-25 · Event managers can change the karma of an event task after an admin approved it
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Business Logic (karma integrity) |
+| Repo / branch | Backend @ `pranav-dev` |
+| Location | `api/dashboard/events/task_views.py:183` `EventTaskDetailAPI.patch`; serializer `api/dashboard/events/serializers.py:232` `EventTaskWriteSerializer` (fields `hashtag, title, description, karma, type, ig, level, org, bonus_time`) |
+| Dependency | Dashboard manage-events task tab (`/dashboard/manage-events/[id]`) |
+
+- **Problem.** Creating an event task sets `approval_status='pending'` and `active=False` (admin must approve). Editing does **not** reset the approval. The event creator, co-owners, company admins and company mentors can PATCH an approved, active task and set `karma` to any number (there is no maximum). Company tasks (`company/task_views.py:341-347`) and mentor tasks do reset to pending on edit — events are the exception.
+- **Why it matters.** Approve a 10-karma task, then change it to 10,000. Every submission of that hashtag then earns the new value.
+- **Expected / Current.** Any change to karma/hashtag/level sends the task back to pending / edit is silently live.
+- **Reproduce.** Create an event task, let an admin approve it, then `PATCH /api/v1/dashboard/events/manage/<event_id>/tasks/<task_id>/` `{"karma": 10000}`.
+- **Fix.** On PATCH set `approval_status='pending', active=False` when `karma`, `hashtag`, `level`, `ig` or `org` change (same as company tasks); add a max karma validator.
+- **Impact.** Karma inflation through events.
+
+### H-26 · A shared pagination change (2026-08-30) broke five list APIs, including two admin pages
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Regression / Bug |
+| Repo / branch | Backend @ `pranav-dev` (commit `f9f35ef`, 2026-08-30) |
+| Location | `utils/utils.py:100` `CommonUtils.get_paginated_queryset` now reads `queryset._fields`. Callers that pass a Python list crash: `api/dashboard/dynamic_management/dynamic_management_view.py:43` (`DynamicRoleAPI.get`), `:112` (`DynamicUserAPI.get`), `api/dashboard/discord_moderator/discord_mod_views.py:104` (`LeaderBoard.get`), `api/dashboard/mentor/mentor_views.py:230` (`MentorActivityListAPI.get`), `api/launchpad/launchpad_views.py:1167` (`ListLaunchpadStudentsAPI.get`) |
+| Dependency | Dashboard `/dashboard/management/dynamic-type` (`features/dynamic-type/api/dynamic-type.api.ts:96,138`), `/dashboard/management/discord-moderation` (`features/discord-moderation/api/discord-moderation.api.ts:95`) |
+
+- **Problem.** `AttributeError: 'list' object has no attribute '_fields'` → HTTP 500 on every call.
+- **Why it matters.** The Dynamic Type management page cannot list anything (confirmed in the browser crawl: both list calls return 500), the Discord moderation leaderboard is empty, and the mentor activity feed and Launchpad eligible-students list are down.
+- **Expected / Current.** Lists work / 500.
+- **Reproduce.** As Admin: `GET /api/v1/dashboard/dynamic-management/dynamic-role/`.
+- **Fix.** In `get_paginated_queryset`, use `is_grouped = getattr(queryset, "_fields", None) is not None` and keep a list branch (slice + count) for non-QuerySet inputs; add a unit test with a list input.
+- **Impact.** Admin tooling outage since 2026-08-30.
+
+### H-27 · The learning-circle invite link page always says "Invalid or Expired Link"
+| Field | Detail |
+|---|---|
+| Severity / Category | High · API / Cross-repo |
+| Repo / branch | Backend @ `pranav-dev` + Dashboard @ `dev` |
+| Location | Backend `api/dashboard/learningcircle/learningcircle_views.py:1550` `CircleInviteStatusAPI.get(self, request)` (no `link_id` parameter) mounted on `invite/status/<str:link_id>/`. Dashboard `src/features/learning-circle/api/learning-circle.api.ts:294` `getInviteByLink`, page `src/app/(dashboard)/dashboard/learning-circle/invite/[link_id]` → `InviteLinkView` |
+| Dependency | Invite links sent to users |
+
+- **Problem.** The dashboard calls `GET /learningcircle/invite/status/<link_id>/`. Django passes `link_id` to `get()`, which does not accept it → `TypeError` → HTTP 500. The page treats any error as an invalid link.
+- **Why it matters.** Nobody can open an invite link. (Accepting from the "Invites" list still works because it uses POST.)
+- **Expected / Current.** Page shows the invite with Accept/Reject / page always shows "Invalid or Expired Link".
+- **Reproduce.** Open `/dashboard/learning-circle/invite/<any link id>`.
+- **Fix.** Add `def get(self, request, link_id=None)` that returns the single invite (only if it belongs to the caller), or change the FE to use the list endpoint and filter.
+- **Impact.** Invite-by-link feature is dead.
+
+### H-28 · All public Learning Circle report APIs crash (field `name` no longer exists)
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Bug (also broken on backend `dev`; not a new regression) |
+| Repo / branch | Backend @ `pranav-dev` |
+| Location | `api/common/common_views.py:151, 208, 281, 312, 372, 507, 559` (`circle_name=F("circle__name")`), `:181, 189, 237, 245` (`Count("learning_circle_ig")`); `api/common/serializer.py:26, 82, 154, 174, 186` (`LcListSerializer` / `LcDetailsSerializer` use `name`). Model `db/learning_circle.py:18` has `title`, and the IG reverse name is `learning_circle_ig_id` |
+| Dependency | Public website (not the dashboard): `GET /api/v1/public/lc-list`, `/public/<circle_id>/lc-details/`, `/public/lc-dashboard/`, `/public/lc-report/`, `/public/lc-report/csv/`, `/public/lc-enrollment/`, `/public/lc-enrollment/csv/` |
+
+- **Problem.** `FieldError: Cannot resolve keyword 'name'` / `ImproperlyConfigured: Field name 'name' is not valid for model 'LearningCircle'` → HTTP 500 for everyone (confirmed for anonymous, learner and admin).
+- **Why it matters.** Any public LC listing, LC detail page and the LC enrollment/report exports are down.
+- **Fix.** Replace `circle__name` → `circle__title`, `name` → `title` in the two serializers (keep the JSON key `name` with `source="title"` so clients do not break), and `learning_circle_ig` → `learning_circle_ig_id`.
+- **Impact.** Public LC pages and reports broken.
+
+### H-29 · Donation payment verification can be replayed (duplicate paid donations and tax receipts)
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Business Logic / Data integrity (payments) |
+| Repo / branch | Backend @ `pranav-dev` |
+| Location | `api/donate/views.py:461` `RazorPayVerification.post`, `:694` `RazorPaySubscriptionVerification.post`; model `db/donation.py:13` (`payment_id` has no unique constraint) |
+| Dependency | Public donation page (not the dashboard) |
+
+- **Problem.** The view checks the Razorpay signature, then always creates a new `Donation(is_paid=True)`, a **new invoice number**, and e-mails a receipt with PAN and address. Nothing checks whether this `payment_id` was already recorded.
+- **Why it matters.** Re-sending the same valid request (browser retry, double click, or on purpose) inflates donation totals and produces several tax receipts with different invoice numbers for one payment. It can also be used to flood the donor's inbox.
+- **Expected / Current.** Idempotent: one payment = one record + one receipt / every call creates new ones.
+- **Reproduce.** Complete a test payment, then POST the same `{razorpay_order_id, razorpay_payment_id, razorpay_signature}` to `/api/v1/donate/verify/` again.
+- **Fix.** Add a unique index on `donation.payment_id`; at the start of the view return the existing record if found; generate the invoice only once; also check `payment_data["status"] == "captured"` (see M-44).
+- **Impact.** Wrong financial records and duplicate 80G/tax documents.
+
+### H-30 · Company "Collaborations" page crashes on load
+| Field | Detail |
+|---|---|
+| Severity / Category | High · API contract / Frontend |
+| Repo / branch | Dashboard @ `dev` + Backend @ `pranav-dev` |
+| Location | Dashboard `src/features/company-jobs/api/jobs.api.ts:909-938` (`fetchCollaborations`, `discoverCollaborations` return `res.response ?? []`), `components/collaborations/company-collaborations-client.tsx:124-127` (`myCollaborations.filter(...)`), schema `schemas/jobs.schema.ts:1499` (`z.array(...)`). Backend `api/dashboard/company/collaboration_views.py:62-75, 190-200` (paginated: `{"data": [...], "pagination": {...}}`) |
+| Dependency | Page `/dashboard/company/collaborations` (Company role) |
+
+- **Problem.** The backend returns a paginated object; the dashboard expects a plain array. The schema check fails, the client returns the raw object, and `myCollaborations.filter is not a function` crashes the React tree (seen in the browser crawl, Company role).
+- **Expected / Current.** List of collaborations / the page shows the error screen.
+- **Reproduce.** Log in as a company → open `/dashboard/company/collaborations`.
+- **Fix.** Either read `res.response.data` in both API functions (and use the pagination), or return a plain list from the two backend views. Make the list schemas strict so this fails loudly in tests.
+- **Impact.** The whole collaborations feature is unusable.
+
+### H-31 · Company "Event Templates" page crashes (regression from 2026-08-19)
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Regression / Frontend |
+| Repo / branch | Dashboard @ `dev` (commit `9246f1f` "redesigned the Task Templates modal", 2026-08-19) |
+| Location | `src/features/company-jobs/components/templates/company-templates-client.tsx:228-319` — a `<TabsContent value="event-templates">` is rendered after the parent `<Tabs>` was removed (the unused `Tabs` import at `:46` is one of the lint warnings) |
+| Dependency | Page `/dashboard/company/event-templates` |
+
+- **Problem.** Radix throws "`TabsContent` must be used within `Tabs`" on every render → the page crashes (seen in the crawl).
+- **Fix.** Remove the `TabsContent` wrapper (render the content directly) or restore the `<Tabs>` root. Add a render test for the page.
+- **Impact.** Companies cannot see or create event templates.
+
+### H-32 · Company "Feedback & Impact" page crashes, and the impact report shows empty numbers
+| Field | Detail |
+|---|---|
+| Severity / Category | High · API contract |
+| Repo / branch | Dashboard @ `dev` + Backend @ `pranav-dev` |
+| Location | Dashboard `src/features/company-jobs/api/jobs.api.ts:880-893` (`fetchCompanyFeedbackList` expects an array; `fetchCompanyImpactReport` expects `{company_id, company_name, total_hires, total_gigs, total_karma_awarded, campuses_engaged, is_published, published_at}` — `schemas/jobs.schema.ts:1471`). Backend `api/dashboard/company/feedback_views.py:148-170` (paginated list) and `:271` `CompanyImpactReportAPI` (returns `{company:{id,name}, reach:{…}, quality_signal:{…}, outcome_signal:{hires, karma_distributed}}`) |
+| Dependency | Page `/dashboard/company/feedback` |
+
+- **Problem.** `feedbackList.map is not a function` crashes the page (crawl). Even after that is fixed, every impact-report field the UI reads is `undefined` (7 schema errors), and `is_published` is missing, so the "publish impact report" toggle cannot show the real state.
+- **Fix.** Align one contract: update the dashboard schema/UI to the backend's nested shape (or flatten on the backend), and read `response.data` for the paginated list.
+- **Impact.** Feedback and the public impact report cannot be managed.
+
+### H-33 · Dashboard calls `/company/user-status/`, which does not exist (the request hits another route)
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Cross-repo / Missing endpoint |
+| Repo / branch | Dashboard @ `dev` + Backend @ `pranav-dev` |
+| Location | Dashboard `src/api/endpoints.ts:148` (`userStatus: "/api/v1/dashboard/company/user-status/"`), `features/company-jobs/api/jobs.api.ts:688` `fetchUserCompanyStatus`, `components/admin/company-admins-client.tsx:63-77` (shows `pending_invitations`). Backend `api/dashboard/company/urls.py` has no `user-status/` route; the URL matches `path("<str:company_id>/", CompanyDetailAPI)` (Admin-only) instead |
+| Dependency | Page `/dashboard/company/admin` (co-admin management). Related: H-12 |
+
+- **Problem.** Because `user-status` is treated as a company id, Company users get `400 "You do not have the required role to access this page."` (crawl). The page never gets `pending_invitations`, so invites are never shown. The earlier call-site check counted this as "OK" because the URL does resolve — to the wrong view.
+- **Fix.** Add a real `company/user-status/` view (owner / delegate / pending invites for the caller) **above** the `<str:company_id>/` pattern, or point the dashboard to an existing endpoint. Consider moving `<str:company_id>/` routes under a prefix (for example `detail/<id>/`) so literal paths can never be swallowed.
+- **Impact.** Together with H-12, the co-admin feature cannot work.
+
+### H-34 · Every "public" page sends anonymous visitors to the login page (shared profile links do not work)
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Frontend / Cross-repo |
+| Repo / branch | Dashboard @ `dev` |
+| Location | `src/features/notification/hooks/use-notification.ts:60-68` `useUnreadCount` (no `enabled` guard, polls every interval) used by `components/notification-popover.tsx:53`, rendered by `src/components/dashboard/app-topbar.tsx:102` on every dashboard layout page; `src/api/client.ts` (`isTokenExpired` treats the backend's `statusCode: 1000` as "token expired" → `refreshAccessToken()` → `clearTokens()` + `redirectToLogin()`). Public list: `src/lib/auth/public-routes.ts` (`/dashboard/mujourney`, `/dashboard/search`, `/dashboard/interest-groups`, `/dashboard/events`, `/profile/<muid>`, `/dashboard/profile/<muid>`) |
+| Dependency | Backend `GET /api/v1/notification/unread-count/` (login required → 403 `statusCode 1000`); `/profile/<muid>` also calls `GET /dashboard/profile/` (own profile, login required) |
+
+- **Problem.** The edge proxy correctly lets anonymous users into the public routes, but the shared top bar immediately calls an authenticated API. The 403 is treated as an expired session, the client tries to refresh (there is no refresh token), clears cookies and redirects to `/login`.
+- **Seen in the crawl.** Anonymous visits to all 11 public pages ended on `/login` (for example `/profile/learner@mulearn`, `/dashboard/mujourney/learner@mulearn`, `/dashboard/search/students`, `/dashboard/interest-groups/<id>`), right after `GET /notification/unread-count/ → 403`.
+- **Why it matters.** "Share your profile" links, public muJourney pages and the public IG/event pages cannot be opened by anyone who is not logged in.
+- **Expected / Current.** Public pages render for visitors / visitors are forced to log in.
+- **Fix.** Add `enabled: authStore.isAuthenticated()` to `useUnreadCount` (and hide the popover for visitors); on `/profile/<muid>` do not call the own-profile endpoint when logged out; in `apiClient`, do not redirect to login when there was never a session.
+- **Impact.** Every public, shareable page is broken for new visitors.
+
+### H-35 · Production runs Django's development server, and no scheduled job ever runs (no Celery beat)
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Deployment / Reliability |
+| Repo / branch | Backend @ `pranav-dev` (same files on `dev`) |
+| Location | `docker-compose.yml:19` and `docker-compose.pod.yml:19` (`entrypoint: python manage.py runserver 0.0.0.0:8000`); `Dockerfile:11` (`# ENTRYPOINT sh entrypoint.sh` — the daphne entrypoint is commented out); both compose files mount `.:/app` over the image; the only Celery service is `celery -A mulearnbackend.celery worker -l info` (no `beat`, no `-B`). Deploy workflows `prod-deploy.yml`, `dev-deploy.yml`, `pod1-roll.yml` use these compose files. `mulearnbackend/settings.py:322-365` defines 10 `CELERY_BEAT_SCHEDULE` jobs |
+| Dependency | Every dashboard page; event status, mentor sessions, campus/LC rankings shown in the dashboard |
+
+- **Problem.**
+  1. The API is served by `runserver` — Django's development server, which is not built for production traffic, security or stability, and auto-reloads when files change (the bind mount means a `git pull` on the host restarts the server mid-request).
+  2. Nothing runs Celery **beat**, so none of the 10 scheduled jobs run: `transition_event_statuses_task` (event status stays "upcoming"/"ongoing" — the first report's M-11 assumed it runs daily), `transition_mentorship_session_statuses`, `expire_stale_jobs`, `expire_stale_applications`, `expire_stale_grants`, `intern_daily_status_cron`, `intern_task_deadline_cron`, `update_alumni_status_cron`, `refresh_org_aggregates`, `refresh_learning_circle_aggregates`.
+- **Why it matters.** `organization.cached_total_karma/cached_member_count` and `learning_circle.cached_total_karma/cached_rank` are **only** written by those crons and are read by the org list, campus search, campus rank, LC detail and leaderboards (7 places in `api/`). Without beat they stay at their default `0`, so every college shows 0 karma and LC ranks are 0. Expired jobs, mentor grants and applications never expire; alumni are never flagged; intern status/deadline automation never happens.
+- **Expected / Current.** A production ASGI/WSGI server (daphne, as `entrypoint.sh` already defines, or gunicorn + uvicorn workers) and a `celery beat` service / dev server and no beat.
+- **Reproduce.** `docker compose -f docker-compose.yml config` → no beat service; check `organization.cached_total_karma` in production.
+- **Fix.** Use `entrypoint.sh` (daphne) or gunicorn; remove the `.:/app` mount in production; add a `beat` service (`celery -A mulearnbackend.celery beat -l info`, with a persistent schedule file or `django-celery-beat`); run the two aggregate crons once by hand after deploy. See M-59 for the worker side.
+- **Impact.** Unstable API server; wrong karma/rank numbers across the dashboard; business automation silently off.
+
 ---
 
 ## 4. Medium and low issues
@@ -736,6 +992,122 @@ Format: **ID · Title** — Severity · Category · Repo @ branch · Location �
 - A dead branch in `UserAuthenticationAPI` (`flag_register_*` cache key) skips all brute-force protection. Nothing in the backend sets that key today, but it is a hidden bypass. Remove it.
 - *Fix:* Same hardening as M-22. Merge the tested `feat/new-auth` work after it gets the C-09 and H-19 fixes.
 
+#### Medium issues added in the second pass
+
+**M-29 · muJourney progress bar shows the karma of only one task** — Medium · Bug · Backend @ `pranav-dev` · `api/dashboard/profile/profile_view.py:834-882` `UserLevelFeedAPI.get` (sum at `:862-872`); Dashboard `src/features/mujourney/components/GameProgressBar.tsx:37-93`.
+- *Problem.* `KarmaActivityLog.objects.filter(...).annotate(total_karma=Sum("karma")).values("total_karma").first()` groups by row, so it returns the karma of **one** log, not the total. Verified: 3 logs of 10/20/30 → API returns 10, correct value is 60.
+- *Expected / Current.* Level progress = total karma earned for the current level / karma of one random task.
+- *Fix.* Use `.aggregate(total=Sum("karma"))["total"] or 0`.
+- *Impact.* Every learner sees a wrong progress bar on `/dashboard/mujourney`.
+
+**M-30 · Free karma for typing anything into social-link fields** — Medium · Business Logic · Backend · `api/dashboard/profile/profile_serializer.py:638-699` `LinkSocials.update` (route `PUT /dashboard/profile/socials/edit/`, used by `features/profile/api/profile.api.ts:155`).
+- *Problem.* When any of 9 social fields changes from empty to **any string** (no URL or domain check), the code creates an auto-approved `KarmaActivityLog` (+20) and updates the wallet. 9 fields → +180 karma by typing junk. When a link is removed and the matching log is missing (old data), `.first().delete()` raises `AttributeError` → 500, and the user can never clear that link.
+- *Fix.* Validate each field as a URL for the right domain (github.com/…, linkedin.com/in/…); award once per platform per user (unique log); handle a missing log; make wallet + log atomic (M-17).
+- *Impact.* Cheap karma inflation for every user.
+
+**M-31 · Users can change their login email and phone with no verification; "communities" accepts any org** — Medium · Security · Backend · `api/dashboard/profile/profile_serializer.py:460-546` `UserProfileEditSerializer` (route `PATCH /dashboard/profile/`, used by `features/profile/api/profile.api.ts:195`).
+- *Problem.* `email` and `mobile` are plain editable fields. Email is the login id and the password-reset address. `communities` accepts any `Organization` id (not only `Community`) and creates verified links (another path to H-23). A bad id → FK error → 500.
+- *Fix.* Change email/mobile only through an OTP/verification flow; validate `communities` against `org_type="Community"`.
+- *Impact.* Account recovery goes to unverified addresses; typo = locked-out user; wrong org links.
+
+**M-32 · "Delete my account" API deletes everything at once, with no confirmation** — Medium · Security / Data · Backend · `api/dashboard/profile/profile_view.py:126` `UserProfileEditView.delete` (route `DELETE /dashboard/profile/`).
+- *Problem.* Hard `User.delete()` with no password re-check, no confirmation token, no soft-delete. It cascades karma logs, links and history; profile/cover images stay on disk; existing tokens stay valid until expiry. (The dashboard does not call it today, but any holder of a token — for example via XSS, see M-23 — can.)
+- *Fix.* Require re-authentication, soft-delete (`suspended_at`), schedule data removal, revoke tokens.
+
+**M-33 · Admin "Edit user" re-creates all role links as approved global roles** — Medium · Business Logic / RBAC · Backend · `api/dashboard/user/dash_user_serializer.py:494-566` `UserDetailsEditSerializer.update` (route `PATCH /dashboard/user/<user_id>/`); Dashboard `features/manage-users/components/form-utils.ts:47` (sends `roles` only when changed).
+- *Problem.* When the admin changes the role list, the backend deletes **all** `UserRoleLink` rows and recreates them with `verified=True` and no `ig`. So: (1) pending, unverified role requests that appear in the list get approved without review; (2) IG-scoped role links lose their IG; (3) `is_primary` is lost; (4) the role-specific cleanup that single removal does (mentor grants, intern guild, company — `dash_roles_views.py:379+`) is skipped. Organizations and IG links are also deleted and recreated (join dates lost; one department/graduation year for all orgs).
+- *Fix.* Diff the old and new lists: add only new roles, remove only missing ones through the same cleanup path as `UserRole.delete`, keep `ig`, `verified`, dates.
+
+**M-34 · Password reset has no rules and weak token handling** — Medium · Security · Backend · `api/dashboard/user/dash_user_views.py:392-486` (`ForgotPasswordAPI`, `ResetPasswordVerifyTokenAPI`, `ResetPasswordConfirmAPI`); used by `features/auth/api/auth.api.ts:85-113`.
+- *Problem.* (1) No password validation: a missing `password` makes `make_password(None)` store an **unusable** password (the user is locked out); any length is accepted. (2) Older reset tokens stay valid until they expire. (3) Sessions/refresh tokens are not revoked after reset. (4) "User not exist" reveals which emails/muIDs are registered. (5) No rate limit; the SMTP send runs inside the request.
+- *Fix.* Use Django password validators; reject empty passwords; delete all `ForgotPassword` rows of the user on success; return the same message for unknown accounts; queue the e-mail; rate-limit by IP and account.
+
+**M-35 · Admin CSV exports load every row into memory** — Medium · Performance / Privacy · Backend · `api/dashboard/user/dash_user_views.py:233` `UserManagementCSV.get` (`GET /dashboard/user/csv/`), `:358` `UserVerificationCSV.get`, `organisation_views.py:246` `InstitutionCSVAPI`, `task/dash_task_view.py:687` `TaskListCSV`, `career_lab` `HiringCSVAPI`.
+- *Problem.* The whole table (users with email and mobile) is serialized in one request, with no streaming, filter or limit. On a large DB this times out or exhausts worker memory. Exports of PII are not logged.
+- *Fix.* Stream with `StreamingHttpResponse` + `iterator()`, or generate in Celery and e-mail a link; log who exported what.
+
+**M-36 · Excel bulk role assignment skips the "special role" guard** — Medium · RBAC · Backend · `api/dashboard/roles/dash_roles_views.py:494` `UserRoleBulkAssignAPI.post` (`POST /dashboard/roles/bulk-assign-excel/`).
+- *Problem.* The JSON bulk-assign (`:260`) blocks Mentor / Intern / Company because they need extra records. The Excel path does not, so users get these roles (verified) without a `UserMentor` profile, intern guild link or company — their dashboards then fail. IG-scoped roles are granted as global roles. No file size / row limit.
+- *Fix.* Reuse the same guard and the per-role provisioning; cap rows and file size.
+
+**M-37 · Any "IG Lead" can activate an IG that is still only a request** — Medium · Business Logic · Backend · `api/dashboard/ig/dash_ig_view.py:529-575` `InterestGroupActivateAPIView` / `Deactivate…` (`POST /dashboard/ig/<pk>/activate/`).
+- *Problem.* The view sets `status=active` for any IG, including `requested`, `rejected` and `cancelled` ones. IG creation requests are supposed to be approved by an Admin (`PATCH /ig/request/<pk>/` is Admin-only). A global IG Lead can bypass that.
+- *Fix.* Allow activation only from `inactive`; send `requested` IGs through the request review.
+
+**M-38 · Dashboard and backend disagree on who can manage interns** — Medium · Cross-repo / RBAC · Dashboard `src/lib/auth/route-access.ts:137-141` + `roles.ts:93` vs Backend `api/dashboard/manage_interns/**`, `api/dashboard/intern/minutes`.
+- *Problem.* The dashboard lets **Associate** open `/dashboard/management/manage-interns` (and `…/minutes`), but every backend manage-interns API rejects Associate ("You do not have the required role") → the pages load empty with error toasts for Associates. At the same time the backend allows plain **Intern**, which the dashboard hides (H-21).
+- *Fix.* Pick one list (Admin, Associate, Intern Lead) and use it on both sides.
+
+**M-39 · Deleting a task wipes the karma history of everyone who did it** — Medium · Data integrity · Backend · `api/dashboard/task/dash_task_view.py:569` `TaskAPI.delete` (Admin / Fellow / Associate); FKs `db/task.py:258, 294, 385` (`on_delete=CASCADE`).
+- *Problem.* Task delete is a hard delete that cascades all `KarmaActivityLog`, `MucoinActivityLog` and `VoucherLog` rows of that task. Wallet karma is not reduced, so wallet totals and log-based stats (leaderboards, level feed, profile history) disagree.
+- *Fix.* Soft-delete tasks (`active=False`), or block delete when logs exist; if deletion is needed, adjust wallets in the same transaction.
+
+**M-40 · Learning-circle chat WebSocket has no authentication** — Medium · Security · Backend · `api/dashboard/lc/dash_lc_consumers.py` `LcChatConsumer` (ws route `/dashboard/<lc_id>/chat/<room_name>/<user_id>/`, `api/routing.py`).
+- *Problem.* The consumer trusts the `user_id` in the URL. User ids are returned by public APIs (for example `GET /learningcircle/members/<id>/`). The chat group is `chat_{room_name}` and is not tied to `lc_id`, so a member of any circle can join any other circle's room. There is no origin check. (The rest of `api/dashboard/lc/` is dead code, but this consumer is live whenever the ASGI server runs.)
+- *Fix.* Authenticate the socket with the JWT (query param or cookie) in a custom middleware, derive the user from the token, use `chat_{lc_id}`, add `AllowedHostsOriginValidator` — or remove the route if the chat is not used.
+
+**M-41 · Public "landing stats" WebSocket runs full-table counts on every connection** — Medium · Performance / DoS · Backend · `api/common/common_consumer.py` `GlobalCount.connect`, signal handlers `db_signals` (same file).
+- *Problem.* Every anonymous connection runs 6 aggregate queries, including `Sum` + `Count` over the whole `karma_activity_log` table. Opening many connections is a cheap way to load the database. The signal handlers also run `COUNT(*)` + a Redis publish inside every request that creates or deletes a user, LC, IG, role link or organization. The shared `landing_stats.data` dict is mutated from many threads.
+- *Fix.* Cache the stats (for example 60 s) and serve them from the cache; move the signal work to Celery; rate-limit connections.
+
+**M-42 · Anyone can create a learning circle under any college (and broadcast to its students)** — Medium · Business Logic / Abuse · Backend · `api/dashboard/learningcircle/learningcircle_serializer.py` `LearningCircleCreateEditSerialzier` (`ig` and `org` accept any id), `learningcircle_views.py:141-172` (`POST /learningcircle/create/`, broadcast at `:156`).
+- *Problem.* The org is not checked against the creator's own college and the IG is not checked to be active. Each create sends the broadcast "A new Learning Circle "<title>" has been formed in your campus!" to **every member of that campus**, with a title chosen by the user. Each create also gives karma (H-10). PUT can move a circle to another org/IG later.
+- *Fix.* Force `org` = the creator's verified college, require an active IG the user belongs to, rate-limit creation, and escape/limit the title in broadcasts.
+
+**M-43 · A circle lead can add any user as a member without their consent** — Medium · Business Logic · Backend · `api/dashboard/learningcircle/learningcircle_views.py:1418` `CircleMemberAddAPI.post` (`POST /learningcircle/members/add/<circle_id>/`, used by `features/learning-circle/api/learning-circle.api.ts:164`).
+- *Problem.* The lead gives a muid; the backend deletes that user's pending invite/request and creates `accepted=True` directly. There is no consent, no college/IG check, no member cap, and a user who rejected an invite gets a second link. With the meeting report flow (minimum 2 attendees, the organizer can approve themselves) this helps karma farming with extra accounts (see H-10).
+- *Fix.* Turn "add" into "invite" (user must accept), or limit it to users of the same campus/IG and notify them.
+
+**M-44 · Donation verification ignores its own validation result and the payment status** — Medium · Data integrity · Backend · `api/donate/views.py:516` and `:750` (`if donation_serializer.is_valid(): save()` with no else).
+- *Problem.* If validation fails, the payment is **not recorded**, but the API still returns success and e-mails a receipt. The Razorpay payment `status` (`captured`) is never checked.
+- *Fix.* Return an error (and alert) when the record cannot be saved; require `captured`; use a Razorpay webhook as the source of truth.
+
+**M-45 · Referral invites can be used to send spam from muLearn's mail server** — Medium · Abuse · Backend · `api/dashboard/referral/referral_view.py` `Referral.post` (`POST /dashboard/referral/send-referral/`).
+- *Problem.* Any logged-in user can make the platform send "AN INVITE TO INSPIRE" e-mails to any address, as many times as they want (no rate limit or de-duplication). The only user-controlled text is the sender's full name, which is free text (a URL or a phishing line fits). An unknown `invite_type` returns success without doing anything. The muCoin debit is a read-modify-write (`wallet.coin -= 1`), so two parallel requests can spend the same coin.
+- *Fix.* Rate-limit per user/day, de-duplicate per target email, validate `invite_type`, use `F("coin") - 1` with a `coin__gte=1` filter.
+
+**M-46 · Discord moderation task list crashes when any karma log has no user** — Medium · Bug · Backend · `api/dashboard/discord_moderator/serializer.py:7` (`source="user.full_name"`) on nullable `KarmaActivityLog.user` (`db/task.py:259`); page `/dashboard/management/discord-moderation` (`features/discord-moderation/api/discord-moderation.api.ts:54`).
+- *Problem.* One log with `user=NULL` (allowed by the model) makes the whole list return 500. The view also lists **all** karma logs in the system with no filter by moderator scope.
+- *Fix.* `source="user.full_name", default=None` (or filter `user__isnull=False`), and filter to Discord-channel tasks.
+
+**M-47 · Three campus APIs always crash** — Medium · Bug · Backend · `api/dashboard/campus/campus_views.py:794` (`GET /dashboard/campus/student-list/`: `annotate(full_name=F("full_name"), …)` → "The annotation 'full_name' conflicts with a field on the model"); `api/dashboard/campus/serializers.py:858, 885` (`GET /campus/learning-circles/<id>/members/`, `GET /campus/igs/<id>/members/`: `user.user_lvl_link_user.first()` on a OneToOne relation).
+- *Problem.* 500 for every caller (confirmed for Campus Lead, Enabler, Lead Enabler, Mentor). The dashboard does not call these three routes today, but other clients may.
+- *Fix.* Remove the self-annotations; use `getattr(obj.user, "user_lvl_link_user", None)`.
+
+**M-48 · `PATCH /dashboard/profile/user-preferences/` always crashes** — Medium · Bug · Backend · `api/dashboard/profile/profile_view.py:941` uses `profile_serializer.UserPreferencesSerializer`, which does not exist → `AttributeError` → 500. (The dashboard uses `/dashboard/user/preferences/` instead, which works.) *Fix.* Remove the method or add the serializer.
+
+**M-49 · Top-100 coders leaderboard always crashes** — Medium · Bug · Backend · `api/top100_coders/top100_view.py:25-74` raw SQL selects `u.profile_pic`, but `profile_pic` is a Python property (`db/user.py:44`), not a column (`schema.sql` user table has none) → `OperationalError` → 500 for everyone on `GET /api/v1/top100/leaderboard/`. *Fix.* Remove the column from the SQL and build the URL in Python.
+
+**M-50 · Launchpad and dashboard tokens are interchangeable** — Medium · Security · Backend · `utils/launchpad_permission.py:88` `LaunchpadJWTUtils.is_jwt_authenticated`, `api/launchpad/launchpad_views.py:90` `generate_launchpad_jwt`; `utils/permission.py:160` `JWTUtils.is_jwt_authenticated`.
+- *Problem.* Both systems sign tokens with the same `SECRET_KEY` and check only `id` + `expiry` (never `tokenType` or an audience). A dashboard token is accepted by Launchpad views, which then crash with `KeyError: 'user_type'` (500 on 14 routes: `job/<id>`, `hire-requests`, `accepted-students`, `list-launchpad-students`, `send-job-invitations`, `application-final-decision`, `register-recruiter`, `add-job`, `change-password`, …). A Launchpad token (id = a Launchpad company/recruiter id) is accepted by every dashboard view as a logged-in user with no roles.
+- *Fix.* Add `aud` ("dashboard" / "launchpad") and `tokenType` to every token and check them; use a separate key for Launchpad.
+
+**M-51 · Outbound HTTP calls without timeouts (and one public endpoint that calls a third party on every request)** — Medium · Reliability · Backend · 25 `requests.*` calls, only 6 set a timeout: `api/integrations/wadhwani/wadhwani_views.py`, `qseverse/qseverse_views.py`, `kkem/kkem_views.py`, `kkem/kkem_helper.py`, `integrations_helper.py:108-120`, `api/dashboard/profile/profile_view.py:437` (favicon download for QR), `api/common/common_views.py:674` (`GTASANDSHOREAPI`), `utils/utils.py`, `mu_celery/task.py`, `mu_celery/achievement_tasks.py`.
+- *Problem.* A slow partner API holds a worker forever (the prod server is the single-process `runserver`, see earlier deployment findings). `GET /api/v1/public/gta-sandshore/` is anonymous, calls `devfolio.vez.social` on every hit, writes `response.json` into the working directory (race between requests) and crashes if the partner is down and the file does not exist.
+- *Fix.* Add `timeout=(3, 10)` everywhere (a shared session helper), cache partner responses, remove the file write.
+
+**M-52 · Registration crashes (500) for an unknown invite code** — Medium · Bug · Backend · `api/register/serializers.py:218-224` `ReferralSerializer.validate_invite_code` does `.filter(...).first().user` and only catches `DoesNotExist` → `AttributeError` → 500 on `POST /api/v1/register/` (verified). *Fix.* `obj = …first(); if not obj: raise ValidationError(...)`.
+
+**M-53 · Hackathon "add organiser" always crashes** — Medium · Bug · Backend · `api/hackathon/serializer.py` never imports `User`: `HackathonOrganiserSerializer.validate_muid` (`:378`) → `NameError` on every `POST /api/v1/hackathon/add-organiser/<id>/`; `list-applicants` (`:425-427`) crashes when a submission has `data=NULL` or is missing system fields; `submit-hackathon` without a hackathon → `IntegrityError` 500. Not used by the dashboard. *Fix.* `from db.user import User`; validate inputs.
+
+**M-54 · Intern pages: the dashboard lets Admin and Intern Lead in, the backend only answers Interns** — Medium · Cross-repo / RBAC · Dashboard `src/lib/auth/route-access.ts:81-87` (`/dashboard/intern*`: Admin, Intern, Intern Lead) vs Backend `api/dashboard/intern/**` (`role_required([INTERN])` on overview, tasks, timesheets, reviews, leave, leaderboard; `intern/guilds/` and `intern/tasks/categories/` also reject Intern Lead).
+- *Seen in the crawl.* As Intern Lead and as Admin, every call on `/dashboard/intern`, `/intern/leaderboard`, `/intern/leave`, `/intern/minutes`, `/intern/quest-log`, `/intern/tasks`, `/intern/timesheet`, `/intern/weekly-review` returns `400 "You do not have the required role"`. On the manage pages, `GET /dashboard/intern/guilds/` and `/intern/tasks/categories/` fail for Intern Lead, so the guild/category dropdowns on `/dashboard/management/manage-interns/tasks` and `/minutes` are empty.
+- *Fix.* Decide who uses each page; either hide intern pages from Admin/Intern Lead, or allow those roles on the read APIs; allow Intern Lead on `guilds` and `tasks/categories`.
+
+**M-55 · Zonal and District dashboards: Admin is let in but rejected; leads need a college link** — Medium · Cross-repo / RBAC · Dashboard `route-access.ts:71-78` (`ZONAL_ROLES`, `DISTRICT_ROLES` include Admin) vs Backend `api/dashboard/zonal/dash_zonal_views.py`, `district/dash_district_views.py` (Admin rejected; scope is taken from the lead's **own college link** → "No college organization linked to this user." for a lead without one).
+- *Seen in the crawl.* Admin: 5/5 calls → 400 role error on both pages. Zonal/District lead without a college link: 5/5 calls → 400.
+- *Fix.* Store the zone/district on the role assignment (not derived from the college); let Admin pick a zone/district; align the role lists.
+
+**M-56 · Career Labs and Departments admin pages are open to Fellows in the dashboard, but the backend rejects them** — Medium · Cross-repo / RBAC · Dashboard `route-access.ts:122` (`/dashboard/management/homepage` → `MANAGEMENT_ROLES` incl. Fellow) and `route-access.ts:161` (`/dashboard/management/organizations/departments` → `FELLOW_MANAGEMENT_ROLES`) vs Backend `api/dashboard/career_lab/career_lab_views.py:17` (`CAREER_LAB_ADMIN_ROLES = [Admin, Associate]`) and `organisation_views.py:434` `DepartmentAPI` (Admin only). Crawl: Fellow → `GET /dashboard/career-lab/hiring/` 400 and `GET /dashboard/organisation/departments/` 400 ("You do not have the required role"). *Fix.* Align the role lists.
+
+**M-57 · Talent Pool page is visible to everyone but only works for verified companies** — Medium · UX / RBAC · `/dashboard/talent-pool` has no entry in `route-access.ts` (falls back to "any logged-in user"), while `GET /company/mulearners/` and `/shortlist/` require a verified company (crawl: Admin and Student get "Access denied. Verified company profile required."). *Fix.* Add `/dashboard/talent-pool` to the access map (Company) and hide it from other roles.
+
+**M-58 · Home "open jobs" count is always empty** — Medium · API contract · Dashboard `src/features/home/api/home.api.ts:73-79` returns `response.pagination.totalCount`; schema `home.schema.ts:115-121` expects `currentPage/totalCount/previousPage`. Backend pagination (`utils/utils.py` `get_paginated_queryset`) returns `count/totalPages/isNext/isPrev/nextPage`. So `totalCount` is `undefined` on the home quick-action card. *Fix.* Use `pagination.count` and one shared pagination schema that matches the backend.
+
+**M-59 · Even with beat added, 6 of the 10 scheduled jobs are not registered in the worker** — Medium · Deployment / Bug · Backend · `mulearnbackend/celery.py:8-24` (`include=[alumni_cron, org_aggregates_cron, learning_circle_aggregates_cron]` + `app.autodiscover_tasks()`, which only looks for modules named `tasks.py`; the code lives in `mu_celery/task.py`, `event_cron.py`, `mentor_tasks.py`, `company_tasks.py`, `intern_cron.py`, …).
+- *Verified.* Loading the worker's app the same way the worker does registers only 9 tasks: `achievement_tasks.*` (3), `alumni_cron`, `learning_circle_aggregates_cron`, `media_content_tasks.fetch_and_attach_poster`, `org_aggregates_cron`, `task.onboard_user`, `task.send_email`. **Not registered:** `event_cron.transition_event_statuses_task`, `mentor_tasks.expire_stale_applications`, `mentor_tasks.expire_stale_grants`, `mentor_tasks.transition_mentorship_session_statuses`, `company_tasks.expire_stale_jobs`, `intern_cron.intern_daily_status_cron`, `intern_cron.intern_task_deadline_cron` — a worker would drop them as "unregistered task".
+- *Fix.* List every `mu_celery.*` module in `include=[...]` (or rename them to `tasks.py` inside an installed app) and add a start-up check that every `CELERY_BEAT_SCHEDULE` task is registered.
+
 ### Low
 
 **L-01** · Error-log "dismiss" URL has no trailing slash (`src/api/endpoints.ts:1035`). This relies on the APPEND_SLASH 301 redirect for a PATCH (a RuntimeError when DEBUG=True). *Fix:* Add `/`.
@@ -768,6 +1140,100 @@ Format: **ID · Title** — Severity · Category · Repo @ branch · Location �
 
 **L-09** · `/dashboard/management/manage-launchpad` and `/dashboard/management/verify-organizations` are in `route-access.ts` but have no page (stale config).
 
+#### Low issues added in the second pass
+
+**L-10** · **Anonymous calls to many views crash with 500 instead of 401.** Views that call `JWTUtils.fetch_role/fetch_user_id` without an auth class do `token[1]` on an empty header → `IndexError` (`utils/permission.py:124/137`). Seen on 15+ `achievement/*` routes, `organisation/affiliation/list/`, `institutes/info|prefill/<code>/`, `college/change-college/`, `user/profile/update/`, `user/organization/`, `wadhwani/user-login/`, `launchpad/delete-company/`. The same views accept **expired** tokens (M-14). *Fix:* add `authentication_classes = [CustomizePermission]` everywhere, and make `fetch_*` return 401 on a missing header.
+
+**L-11** · **173 route/method pairs return 500 instead of 405.** One view class is mounted on several URLs (with and without an id), and a method is reachable on the URL that lacks its parameter (for example `PATCH /dashboard/roles/`, `DELETE /dashboard/ig/`, `GET /dashboard/roles/<id>/`, `POST /dashboard/location/countries/<id>/`) → `TypeError: … missing 1 required positional argument` → 500. Full list in Appendix H. Dead dashboard code hits one of them: `src/features/company-tasks/api/tasks.api.ts:223,231` (`updateTaskType`/`deleteTaskType` call `PUT/DELETE list-task-type/` without an id; the live UI uses `features/tasks` which is correct). *Fix:* split list and detail views, or give the methods `pk=None` and return 405.
+
+**L-12** · **Missing-object and bad-input 500s.** `projects_view.py:36,57` (`Project.objects.get` → 500 for an unknown project on `GET/PUT /projects/<pk>/`); `dash_user_views.py:315,350` (`UserRoleLink.objects.get` on verification PATCH/DELETE with a stale id, reachable from the Role Verification page after another admin acted); `dash_roles_views.py:304` (bulk remove without `users` → `TypeError`); `integrations_helper.py:26` (malformed KKEM token → `DecodeError`); `integrations_helper.py:74-81` (`token_required` raises a plain `CustomException`, which DRF does not handle → 500 instead of 401 for KKEM partner calls); `learningcircle_views.py:753` (report with a list instead of a dict); `campus_views.py:503` `ChangeStudentTypeAPI.patch` (member not in the lead's college → serializer without instance → `NotImplementedError: create() must be implemented` → 500 instead of 404). *Fix:* `get_object_or_404`/`filter().first()` + validation; make `CustomException` an `APIException`.
+
+**L-13** · `GET /dashboard/error-log/graph/` crashes when the log is empty (`log_helper.py:291` `[-1]` on an empty list) or contains a path that does not resolve (`resolve(hit)` raises `Resolver404`, `:275`). Not used by the dashboard.
+
+**L-14** · Institution prefill always returns `affiliation_name: null`: `api/dashboard/organisation/serializers.py:244` uses `source="affiliation.name"`, but `OrgAffiliation` has `title`. DRF hides the error because the field is `allow_null`.
+
+**L-15** · A wrong `?referral_id=` blocks sign-up. The register page always sends `referral: {muid}` (`src/app/(auth)/register/register-client.tsx:197,308`); the backend rejects the whole registration if the muid is unknown, and the UI gives no way to drop it.
+
+**L-16** · `generate_muid` (`api/register/register_helper.py:15`) keeps every character of the full name (`/`, `?`, `#`, `@`, emoji) → muIDs that break `<str:muid>` routes and profile links. The uniqueness check then insert is not atomic → `IntegrityError` 500 on two sign-ups with the same name at the same time.
+
+**L-17** · Account existence is exposed: `POST /register/email-verification/` returns `value: true/false` for any email; `POST /dashboard/user/forgot-password/` says "User not exist". No rate limit on either.
+
+**L-18** · `POST /register/select-domains/` and `select-endgoals/` accept unlimited arbitrary strings (no allow-list, no length/count limit); errors are `print()`ed.
+
+**L-19** · The auth proxy views (`api/auth/auth_views.py`) do not forward the client IP (no `X-Forwarded-For`), so the auth server's IP-based throttling and login geo lookup see the backend server's IP. Error messages include `str(RequestException)` (internal `AUTH_DOMAIN` URL).
+
+**L-20** · `GET /register/connect-discord/` has side effects (queues `onboard_user`) and uses an exception from `is_jwt_authenticated` for control flow (anonymous → 400/500 instead of 401).
+
+**L-21** · Admin user delete (`DELETE /dashboard/user/<id>/`) is a hard delete that cascades karma logs and links with no audit record; `PATCH /dashboard/user/<id>/` uses `User.objects.get` (500 for a bad id) and writes into `request.data` (500 for multipart bodies).
+
+**L-22** · Role verification: approving any role sends the `mentor_verification.html` e-mail template; rejecting is a hard delete of the request with no notification to the user (`dash_user_views.py:309-356`).
+
+**L-23** · Public profile endpoints crash or ignore privacy: `GET /profile/user-profile/<muid>/` uses `.get()` → 500 for an unknown muid; `user_settings` can be `None` → 500 in `UserProfileAPI`, `UserLogAPI`, `UserLevelsAPI`, `GetSocialsAPI`, `ShareUserProfileAPI`, `QrcodeRetrieveAPI`; `rank/<muid>/`, `badges/<muid>`, `permute/<muid>/` do not check `is_public` (private users' karma, rank, role titles, IGs and college are exposed; `rank` also reveals who is an Admin).
+
+**L-24** · `UserRankSerializer.get_rank` (`profile_serializer.py:398`) loads the ids of every wallet with karma ≥ the user's into a Python list on each call (hundreds of thousands of rows for new users). `UserLogAPI` returns all karma logs with no pagination.
+
+**L-25** · `ShareUserProfileAPI`: `GET /profile/share-user-profile/` returns `None` → 500; `GET …/<uuid>/` builds the QR for the **caller**, not the uuid, crashes for anonymous users, downloads the favicon on every call (no timeout) and writes a file each time.
+
+**L-26** · Change password (`POST /profile/change-password/`): no password rules, no session revocation, and users who signed up with Google (NULL password) can never set a password (`check_password` always fails). The dashboard has an endpoint key (`src/api/endpoints.ts:45`) but no screen uses it (missing feature).
+
+**L-27** · Home "top college of last month" (`GET /profile/karma-feed/`, `profile_view.py:790`) is not filtered to `org_type="College"`, so a company or community can be shown as the top college.
+
+**L-28** · `PATCH /profile/ig-edit/` (`UserIgEditSerializer`) lets users join IGs whose status is `requested`, `rejected` or `cancelled` (only existence is checked).
+
+**L-29** · `GET /roles/base-template/` has no role check (any user gets the full role list including internal roles); `PUT /roles/bulk-assign/<id>/` is a read ("users without this role") behind a write verb and runs a heavy `~Q` over all users.
+
+**L-30** · IG rename (`PUT /ig/<pk>/`) is not atomic (IG saved first, then four role renames; a clash → `IntegrityError` after a partial rename). IG delete leaves the `"{code} CampusIGCoLead"` role and campus-execom catalog rows behind; deleting an unknown id returns success ("invalid ig", HTTP 200).
+
+**L-31** · IG join limit can be exceeded: re-activating an old inactive link skips the "max 3 IGs" check (`dash_ig_view.py:1276`); the count is not locked. `POST /ig/<pk>/leave/` actually **joins** (same view as `/join/`).
+
+**L-32** · A lead can invite someone "as lead" (`CircleInviteAPI`, `lead=true`), so a circle can end up with several leads, while the transfer-lead code assumes one. Users who rejected once can never request to join again, but a lead can still force-add them (M-43).
+
+**L-33** · Anonymous users can read learning-circle member lists with user ids (`GET /learningcircle/members/<id>/`) and offline meeting places with GPS coordinates (`GET /learningcircle/meeting/list/<id>/`, `meeting/list-public/`). User ids also make M-40 easier.
+
+**L-34** · Organizer report (`POST /learningcircle/meeting/report/<id>/`) expects `attendees` as an object; a list → `AttributeError` 500 (`learningcircle_views.py:753`).
+
+**L-35** · Donations: `get_or_create_donor(email)` (`api/donate/views.py:405`) overwrites an existing donor's name/phone/PAN/address with whatever the next person typed for that e-mail; order creation has no rate limit; error text echoes exception strings.
+
+**L-36** · `POST /dashboard/coupon/verify-coupon/` is anonymous, not rate-limited, returns a hard-coded 100% discount and a hard-coded ticket id for any existing code, and never marks the coupon as used.
+
+**L-37** · `POST /organisation/karma-type/create/` and `karma-log/create/` have no auth class and no role check (any token, even expired; learners reach validation). On success they call `CustomResponse("…")` with a string as `message` → `TypeError` → 500 **after** the row is saved. `OrgKarmaLog` is not used anywhere else.
+
+**L-38** · Org delete (`DELETE /organisation/institutes/delete/<code>/`) is a hard delete that cascades learning circles (`LearningCircle.org on_delete=CASCADE`) and all member links; the Excel org import matches districts by name only (district names are not unique across states); if one row fails serializer validation, nothing is saved but the response is still "success" with an empty list.
+
+**L-39** · `GET /api/v1/protected/organisation/get-institutes/<district>/` is under "protected" but does not check the protection key (the sibling route does); the key is compared with `==`.
+
+**L-40** · `POST /dashboard/projects/` accepts an empty body (the create path uses the all-optional update serializer) → empty projects; errors are `print()`ed.
+
+**L-41** · The company talent directory (`GET /company/mulearners/`) shows the **e-mail** of every user with a public profile to any verified company; making a profile public is not consent to recruiter contact, and `interested_in_work` is ignored.
+
+**L-42** · Campus analytics for **any** `org_id` are readable by any logged-in user (`campus/<org_id>/`, `/leaderboard/`, `student-level/<org_id>/`, `weekly-karma/<org_id>/`). Leaderboard rows include graduation year, department, alumni flag, join date and last-karma date.
+
+**L-43** · Fellow and Tech Team can download, view and **clear** server error logs (`POST /error-log/clear/<name>/`). Logs may hold request data and secrets (M-22); clearing destroys evidence and has no audit trail.
+
+**L-44** · Dead code with runtime errors: `api/dashboard/lc/*` (URLs commented out in `api/dashboard/urls.py:17`; undefined names `user_circle_link` `dash_lc_serializer.py:137`, `previous_meetings` `:477`), `api/dashboard/task_report/*` (never included in any `urls.py`; `TaskReportSerializer` undefined in `views.py:55,87`). Only the LC chat consumer from `lc/` is still live (M-40). Ruff also reports unused variables that hide logic mistakes (for example intern leaderboard `leaderboard_views.py:63-69,171-177` computes `total_intern_karma`, `completed_count`, `complexity_score` and never uses them).
+
+**L-45** · Dashboard shows the literal text **"TODO"** as the placeholder of two select boxes: `src/app/(dashboard)/dashboard/intern/tasks/components/task-detail-dialog.tsx:197` and `intern-task-client.tsx:246`.
+
+**L-46** · Dashboard lint: 50 Biome warnings (unused imports/variables from features disabled because of "backend conflict", 2 `any`): `features/manage-ig/components/ig-form-dialog.tsx` (30), `ig-detail.tsx`, `interest-group-detail-client.tsx`, `company-templates-client.tsx`, `mentor-roster-tab.tsx`, `session-create-dialog.tsx:65`, `session-edit-sheet.tsx:81`, `tasks-view.tsx:3`, `company-jobs/api/jobs.api.ts:39`.
+
+**L-47** · `POST /company/jobs/<id>/view/` (job view counter, `api/dashboard/company/job_views.py` `TrackJobViewAPIView`) is public and de-duplicates by client IP taken from the **`X-Forwarded-For` header first**. The caller controls that header, so sending a different fake value each time bypasses the one-view-per-hour rule and inflates the view count that feeds company conversion analytics. *Fix:* use the proxy-verified client IP (trusted-proxy setting) and de-duplicate per user for logged-in users.
+
+**L-48** · `/dashboard/search` redirect triggers React error #310 ("rendered more hooks than during the previous render") in the production build (seen in the crawl and reproduced; the target page `/dashboard/search/students` itself is fine). The redirect is a server `redirect()` inside a route that the layout treats as public; the hook-order change happens in a `useMemo` in the shared layout during the redirect. *Fix.* Redirect in `next.config`/proxy instead of the page, and check the layout components for hooks after early returns.
+
+**L-49** · Zod schemas are stricter than the backend for nullable fields, so the client logs a mismatch (development) and returns raw, unvalidated data (production): `events/meta/categories/` (`description: null`), `profile/karma-feed/` (`top_user.full_name/muid`, `top_college.name` are `null` when there was no karma last month), `media-content/salt-mango-tree/` and `grab-your-superpowers/` (`campus: null`), `career-lab/hiring/` (`title: null`), auth feature `UserProfileResponseSchema` expects `karma_distribution` as an array but the backend sends an object (`features/auth/schemas/auth.schema.ts:155`; the profile feature handles the object correctly). *Fix.* Mark these fields `.nullable()`, and fail tests on schema mismatches.
+
+**L-50** · Charts render into zero-size containers (Recharts "width(-1) and height(-1)" warnings) on `/dashboard/campus/manage` and `/dashboard/url-shortener/[id]/analytics`. Give the chart wrappers a fixed min height.
+
+**L-51** · Sidebar: "Interest Groups" and "Weekly Twitches" appear twice for admins (learner page and management page share the same label, `src/lib/nav-config.ts:133,181,363,411`); typo "Url Shortner" (`nav-config.ts`).
+
+**L-52** · The dashboard requests `organisation/institutes/college/` and `…/school/` in lower case (`features/search/api/search.api.ts:80,84`, `events.api.ts:622`, `settings.api.ts:57`, `onboarding.api.ts:44`), while `org_type` values are `College`/`School`. It only works because MySQL's default collation is case-insensitive; a case-sensitive collation or another DB returns empty lists. Use the exact enum value.
+
+**L-53** · `.github/workflows/pod1-roll.yml:71,76,91` run `docker-compose -f docker-compose.pod.yml restart backend` / `exec backend …`, but the service in `docker-compose.pod.yml` is called `mulearnbackend` → "No such service: backend"; the restart and "install requirements" options of the roll-out workflow never work.
+
+**L-54** · `pod1-roll.yml:58-64` syncs code with `rsync -avz --delete` from the CI checkout into the server's project folder. Anything on the server that is not in git and not excluded (for example the bind-mounted `./logs` folder of `docker-compose.pod.yml:13`) is deleted on every sync.
+
+**L-55** · `db/models.py` imports every model module "for the side effect of registering models" (its own docstring says to add new modules there) but misses `db/community_partner.py` and `db/intern.py`. Those models are only registered once something imports them (the URLconf does). Processes that do not load the URLconf (Celery worker, some management commands, schema tools) cannot resolve them early; the audit's schema build failed for exactly this reason (`no such table: community_partner`).
+
 ---
 
 ## 5. Complete API wiring audit
@@ -787,7 +1253,7 @@ The full chain for every endpoint is: **UI → API function → URL → Django r
 | Calls with no backend route | 11 (after resolving template URLs; see 5.3) |
 | Calls with the wrong HTTP method | 2 |
 | Calls built from variables (checked by hand for key flows) | 57 |
-| Backend route+method pairs with **no authentication at all** | 208 (≈70 of them change data; see Appendix B) |
+| Backend route+method pairs with **no authentication at all** | 208 (≈70 of them change data; see Appendix A) |
 
 ### 5.3 Every endpoint mismatch found
 
@@ -846,6 +1312,54 @@ Legend: ✅ correct · ⚠️ works with a gap · ❌ broken
 | Notifications admin | ⚠️ legacy CRUD works; dispatch missing | ✅ | ✅ Admin | ✅ | ✅ | ⚠️ | ❌ (H-05) |
 | Uploads (all) | ✅ | ✅ | ✅ | ❌ > 2.5 MB fails | ✅ | – | ❌ (H-08) |
 | Zonal / District | ✅ | ✅ | ✅ | ✅ | ⚠️ `lead_number` gone | – | ⚠️ (M-24) |
+
+### 5.5 Dynamic test of every endpoint (second pass)
+
+Every one of the **1,123 unique route + method pairs** was called as each of the 19 test users (see "How this audit was done"). Results:
+
+| Result | Count |
+|---|---|
+| Route + method pairs tested | 1,123 (1,140 rows including duplicate URL patterns) |
+| Reachable with no login (anonymous got a normal answer) | 172, of which **44 change data** (see Appendix A) |
+| Returned HTTP 500 for at least one role | 263 |
+| — "wrong method on a shared URL" (`TypeError … unexpected keyword` / `missing … argument`) | 173 (L-11, Appendix H) |
+| — anonymous caller hits `JWTUtils` with no header (`IndexError`) | 35 (L-10) |
+| — other crashes (Appendix G; 5 of them are test-data artefacts and are marked as such) | 55 |
+| Writes accepted with an **empty body** by a role that should not reach them | see C-02, C-10, H-21, L-37 |
+
+How to read the per-endpoint table (Appendix E):
+- **Login** — `Login` = anonymous gets 403; `**Public**` = anonymous reaches the view; `Login (anon→500)` = login is needed but anonymous crashes instead of getting 401 (L-10).
+- **Roles that got through** — the test roles that were *not* rejected by a role check (writes were sent with an empty body, so "got through" means the role check passed and validation ran). `any logged-in` = no role restriction was seen.
+- **Used by dashboard** — the dashboard file and line that calls it.
+- **500 seen** — the exception and the roles that triggered it.
+- **Issues** — IDs in this report.
+
+### 5.6 Live schema contract check (second pass)
+
+For each of the 198 dashboard GET calls whose Zod schema could be loaded, the live response was validated against that schema:
+
+| Outcome | Count | Notes |
+|---|---|---|
+| Response matches the dashboard schema | 112 | |
+| Schema mismatch | 17 | 13 real (H-30, H-32, M-58, L-49 and the `karma_distribution` shape), 4 caused by generated test ids that are not UUIDs (not reported) |
+| API error for the chosen role/placeholder id | 44 | Mostly "not found" from placeholder ids; the real ones are H-26, H-27, H-33, M-46, L-12 |
+| Schema could not be loaded by the checker | 25 | Calls without a schema argument (blob/CSV downloads) or re-exported schemas |
+
+The dashboard hides these mismatches in production: `apiClient` logs them only in development and then returns the raw, unvalidated object. That is why three company pages crash with `x.map is not a function` instead of showing a clear error (H-30, H-32).
+
+### 5.7 Literal paths swallowed by parameter routes (second pass)
+
+A call can "resolve" and still hit the wrong view when a literal path segment matches a `<str:…>` pattern. All dashboard calls were checked for this:
+
+| Dashboard call | Resolves to | Result |
+|---|---|---|
+| `GET /dashboard/company/user-status/` (`jobs.api.ts:688`) | `company/<str:company_id>/` (`CompanyDetailAPI`, Admin-only) | **Broken** — H-33 |
+| `GET /dashboard/organisation/institutes/college/` and `/school/` (5 call sites) | `institutes/<str:org_type>/` | Works on MySQL only because of case-insensitive collation — L-52 |
+| `GET /dashboard/organisation/institutes/Company/` (`manageUsers.api.ts:270`) | same | OK |
+
+### 5.8 Per-endpoint table
+
+The full table with all endpoints (1,140 rows) is in **Appendix E** (grouped by module).
 
 ---
 
@@ -908,6 +1422,39 @@ Legend: ✅ correct · ⚠️ works with a gap · ❌ broken
 - Mentor home request handling is broken (H-06).
 - Mentor removal in bulk skips cleanup (M-02).
 
+**Added in the second pass**
+
+**Users, roles and organizations**
+- Any user can self-verify into any organization; campus roles follow the user's current college (H-23).
+- Admin "Edit user" silently approves pending role requests and drops IG scope (M-33).
+- Excel bulk role assignment skips the special-role rules (M-36).
+- Email and phone can be changed without verification (M-31); self-delete is immediate and total (M-32).
+- Password reset: no rules, unusable-password bug, no session revocation (M-34).
+
+**Karma**
+- Interns can award themselves unlimited karma (C-10).
+- Event task karma can be raised after approval (H-25).
+- Social links give free karma for any text (M-30).
+- Task delete wipes karma history without adjusting wallets (M-39).
+- muJourney shows the wrong karma progress (M-29).
+
+**Interest groups**
+- Per-IG leads can mint Mentors and change IG code/status (H-24); IG Leads can activate IGs that are only requests (M-37).
+
+**Learning circles**
+- Anyone can create a circle in any college and broadcast to its students (M-42).
+- Leads can add members without consent (M-43); several leads per circle are possible (L-32).
+- Invite links never open (H-27); public LC reports are down (H-28).
+
+**Interns**
+- The whole management API is open to interns (H-21); roles differ between the dashboard and the backend (M-38, M-54).
+
+**Companies**
+- Collaborations, event templates and feedback pages crash (H-30, H-31, H-32); the co-admin status endpoint does not exist (H-33); talent directory shows student emails (L-41); job view counter can be inflated (L-47).
+
+**Payments**
+- Donation verification can be replayed (H-29) and ignores its own validation (M-44).
+
 ---
 
 ## 7. Frontend audit (mulearn-dashboard @ dev)
@@ -944,6 +1491,32 @@ Legend: ✅ correct · ⚠️ works with a gap · ❌ broken
 9. **Tests and CI:** 14 failing tests, 2 invalid test files, and CI does not run tests (H-17).
 10. **Dead code:** 94 unused endpoint keys, legacy notification hooks, the unused `validateRegistrationData`, and job approval hooks with no UI (L-04, H-13).
 
+### 7.1 Browser crawl of every page (second pass)
+
+The production build was served locally against the backend with test data, and every page was opened in headless Chromium: all **129 pages** as Anonymous, Student and Admin, plus each role-specific page as its role (Company, Mentor, Campus Lead, Enabler, Lead Enabler, IG Lead, Campus IG Lead, Intern, Intern Lead, Zonal, District, Fellow, Associate, Tech Team, Discord Moderator, Comic Admin) — **781 page visits** in total.
+
+| What the crawl saw | Pages | Issues |
+|---|---|---|
+| Page crashes on load (React error / `x.map is not a function`) | 4 — `/dashboard/company/collaborations`, `/company/event-templates`, `/company/feedback`, `/dashboard/search` (redirect) | H-30, H-31, H-32, L-48 |
+| API returns 500 while the page loads | 3 — LC invite link, Discord moderation, Dynamic Type | H-27, H-26, M-46 |
+| Page opens for a role but its APIs reply "You do not have the required role" (or "Verified company profile required") | 22 — 8 intern pages, 8 manage-interns pages, zonal, district, career labs, departments, talent pool, company admin | M-38, M-54, M-55, M-56, M-57, H-33 |
+| Public page sends visitors to `/login` | 11 — every route in `public-routes.ts` | H-34 |
+| Schema mismatch logged (development-mode visits) | 6 | H-30, H-32, L-49 |
+| Charts rendered at size −1 | 2 | L-50 |
+| Access control of the edge proxy | Protected pages sent Anonymous to `/login?ruri=…` and wrong roles to `/dashboard` as designed. No page leaked another role's data on screen. | — |
+
+The full page-by-page result (component file, roles that could open it, roles redirected, number of API calls on load, every problem seen, issue IDs) is in **Appendix F**.
+
+### 7.2 Frontend issues added in the second pass
+
+- **Pages that crash:** H-30, H-31, H-32 (company), L-48 (search redirect).
+- **Public pages unusable without login:** H-34.
+- **Contract drift hidden by lenient schemas:** H-30, H-32, M-58, L-49 (see §5.6). Recommendation from the first report is now proven: turn on `strictSchema` in tests, and report schema mismatches from production to monitoring.
+- **Role maps that differ from the backend:** M-38, M-54, M-55, M-56, M-57 (plus C-07 and H-12 from the first pass).
+- **Missing backend endpoint shadowed by a parameter route:** H-33.
+- **UI polish:** placeholder text "TODO" in intern task selects (L-45), duplicate sidebar labels and a typo (L-51), charts with no size (L-50), lowercase enum values in URLs (L-52), lint warnings from disabled features (L-46), dead API functions with wrong URLs (L-11).
+- **Build:** `next build` passes (123 static pages); typecheck passes; unit tests still fail (H-17).
+
 ---
 
 ## 8. Backend audit (mulearnbackend @ pranav-dev)
@@ -966,6 +1539,51 @@ Legend: ✅ correct · ⚠️ works with a gap · ❌ broken
 6. **Notifications.** Two systems live side by side (legacy `insert_notification` with `url`, and the new `dispatch` for LC only). The feed only reads the new fields (H-04).
 7. **Logging.** Full request bodies are written to logs on errors (M-22). Root logger at DEBUG with no rotation. `print()` in middleware.
 8. **Tests.** Test modules exist (events, LC, projects), but no CI runs them.
+
+**Module-by-module results of the second pass** (every module under `api/` was read and every one of its endpoints was called as every role)
+
+| Module | Endpoints | New issues |
+|---|---|---|
+| `auth` (proxies) | 4 | L-19 |
+| `register` | 22 | H-22, M-52, L-15, L-16, L-17, L-18, L-20 |
+| `dashboard/user` | 34 | H-23, M-33, M-34, M-35, L-10, L-12, L-21, L-22 |
+| `dashboard/profile` | 32 | M-29, M-30, M-31, M-32, M-48, L-23…L-28 |
+| `dashboard/roles` | 30 | M-36, L-29 |
+| `dashboard/organisation`, `college`, `location`, `affiliation` | 102 | L-14, L-37, L-38, L-39 (plus C-01, H-01…H-03, M-05, M-06 from the first pass) |
+| `dashboard/ig` | 36 | H-24, M-37, L-28, L-30, L-31 |
+| `dashboard/learningcircle` | 61 | H-27, M-42, M-43, L-32, L-33, L-34 (plus H-10, M-20) |
+| `dashboard/lc` (unmounted) + websocket | 0 HTTP + 1 websocket | M-40, L-44 |
+| `common` (`/public/…`) + websocket | 30 + 1 websocket | H-28, M-41, M-51 |
+| `dashboard/task`, `task_report` (unmounted) | 29 | M-39, L-44 |
+| `dashboard/events` | 51 | H-25 (plus H-09, M-10, M-11) |
+| `dashboard/company` | 80 | H-30…H-33, L-41, L-47 (plus C-05, H-12, H-13, M-07, M-19) |
+| `dashboard/mentor` | 71 | H-26 (activity), (plus H-06) |
+| `dashboard/campus` | 57 | M-47, L-12, L-42 (plus C-06, C-07) |
+| `dashboard/intern`, `manage_interns` | 80 | C-10, H-21, M-38, M-54 |
+| `dashboard/zonal`, `district` | 14 | M-55 (plus M-24) |
+| `dashboard/career_lab` | 7 | M-56 |
+| `dashboard/dynamic_management` | 34 | H-26 |
+| `dashboard/discord_moderator` | 3 | H-26, M-46 |
+| `dashboard/error_log` | 9 | L-13, L-43 |
+| `dashboard/referral`, `coupon`, `projects` | 25 | M-45, L-36, L-40, L-12 |
+| `donate` | 5 | H-29, M-44, L-35 |
+| `hackathon` | 42 | M-53 |
+| `launchpad` | 52 | M-50 (plus C-04) |
+| `integrations` (kkem, wadhwani, qseverse) | 20 | L-12, M-51 (plus H-15) |
+| `top100_coders`, `leaderboard` | 10 | M-49 |
+| `protected` | 2 | L-39 |
+| `notification` | 13 | (H-04, H-05, M-12, M-18 from the first pass) |
+| `achievement` | 24 | L-10 (plus C-02) |
+| `muComics`, `calendar`, `media_content`, `skill`, `channels`, `category`, `community_partner`, `home`, `feature`, `url_shortener`, `karma_voucher`, `enabler` | 160 | no new High/Critical; lows in Appendix E (for example L-49 for media content) |
+
+**Cross-cutting backend issues found in this pass**
+- `get_paginated_queryset` regression (H-26).
+- 173 route + method pairs crash with `TypeError` because one view class serves URLs with and without a parameter (L-11, Appendix H).
+- 35 views crash for anonymous callers instead of returning 401 (L-10).
+- Missing-object handling (`.get()` without a 404) across modules (L-12).
+- Outbound HTTP without timeouts (M-51).
+- WebSockets without authentication or rate limits (M-40, M-41).
+- Static analysis: undefined names in dead modules, unused variables that hide logic mistakes (L-44).
 
 ### 8b. Auth server audit (authserver @ dev)
 
@@ -996,26 +1614,55 @@ Legend: ✅ correct · ⚠️ works with a gap · ❌ broken
 | C-02 | Achievement admin with no role check; expired tokens accepted | Critical |
 | C-03 | Unauthenticated profile picture overwrite | Critical |
 | C-04 | Launchpad identity taken from the request body | Critical |
-| H-01 | Org request approval by any user | High |
-| C-09 | Self-requested privileged roles become real roles in the JWT (self-service Admin) | Critical |
 | C-08 | Apple mobile sign-in accepts unsigned tokens (take over any account) | Critical |
+| C-09 | Self-requested privileged roles become real roles in the JWT (self-service Admin) | Critical |
+| C-10 | Any Intern can award unlimited karma to themselves (verified) | Critical |
+| H-01 | Org request approval by any user | High |
+| H-10 | Karma farming | High |
+| H-15 | Unauthenticated VC issuance and connected-user email listing | High |
 | H-18 | Refresh token accepted as an access token for 7 days; bypasses logout and role changes | High |
 | H-19 | Weak brute-force protection; IEDC login is an unlimited password oracle; weak OTP; OTP email flooding | High |
-| M-25 | Google OAuth: no `state`, no `aud` check, dev/vercel redirect URIs in prod | Medium |
-| M-26 | Logout fails open when Redis is down; refresh tokens never rotated | Medium |
-| H-15 | Unauthenticated VC issuance and connected-user email listing | High |
-| H-10 | Karma farming | High |
+| H-21 | Interns can use all intern-management APIs (own leave approval, deactivate the Intern Lead) | High |
+| H-22 | Anonymous lookup of any user's email and phone by muID (verified) | High |
+| H-23 | Self-verified membership in any organization; campus scope hijack (verified) | High |
+| H-24 | Per-IG lead can mint verified Mentors and rewrite IG leads/code/status | High |
+| H-25 | Event task karma editable after approval | High |
+| H-29 | Replayable donation verification (duplicate paid records and tax receipts) | High |
 | M-14 | JWT helpers skip the expiry check; role staleness; suspended users | Medium |
 | M-15 | Public user search: IDs, admin enumeration, private users | Medium |
 | M-22 | CORS `*`, debug toolbar, secrets in logs, Django serving media | Medium |
 | M-23 | Refresh token readable by JavaScript | Medium |
+| M-25 | Google OAuth: no `state`, no `aud` check, dev/vercel redirect URIs in prod | Medium |
+| M-26 | Logout fails open when Redis is down; refresh tokens never rotated | Medium |
+| M-31 | Login email/phone changeable without verification | Medium |
+| M-32 | Immediate hard account deletion with no re-authentication | Medium |
+| M-33 | Admin edit auto-approves pending role requests | Medium |
+| M-34 | Password reset weaknesses (unusable password, no revocation, enumeration) | Medium |
+| M-36 | Excel bulk role assign bypasses special-role checks | Medium |
+| M-37 | IG Lead can activate unapproved IG requests | Medium |
+| M-40 | LC chat WebSocket trusts the user id in the URL | Medium |
+| M-41 | Public WebSocket runs full-table aggregates per connection (DoS) | Medium |
+| M-42 | Broadcast spam to any campus by creating a circle there | Medium |
+| M-45 | Referral e-mails usable for spam/phishing | Medium |
+| M-50 | Launchpad and dashboard tokens interchangeable | Medium |
 | L-02 | Unauthenticated terms approval | Low |
 | L-08 | Unchecked link schemes | Low |
+| L-17 | Account enumeration (email check, forgot password) | Low |
+| L-23 | Private profile data exposed through rank/badges/permute | Low |
+| L-36 | Coupon oracle | Low |
+| L-39 | "Protected" endpoint without key check | Low |
+| L-41 | Company talent directory shows student emails | Low |
+| L-42 | Campus analytics for any college readable by any user | Low |
+| L-43 | Error logs can be cleared by Fellow/Tech Team | Low |
+| L-47 | Spoofable `X-Forwarded-For` used for rate limiting | Low |
 
 Other notes:
 - `OrganizationKarmaTypeGetPostPatchDeleteAPI` and `OrganizationKarmaLogGetPostPatchDeleteAPI` (`POST /organisation/karma-type/create/`, `/karma-log/create/`) only need a signed token and no role. Any user can add org karma logs. Add an Admin check.
 - `CollegeChangeAPI` (PATCH `college/change-college/`) has no permission class. It relies on `fetch_user_id` (signature only, no expiry check).
 - The OpenAPI schema at `/api/schema/` uses `IsAdminUser` only while `ENABLE_SWAGGER` is off. When it is on, the schema and docs are `AllowAny`. Make sure `ENABLE_SWAGGER` is off in production.
+
+Other notes added in the second pass:
+- The org karma endpoints above are tracked as L-37; `college/change-college/` and `user/organization/` as H-23.
 
 ---
 
@@ -1033,6 +1680,13 @@ Other notes:
 | Org dropdowns | `perPage=1000` loads (verify dialog, departments, interns, task types) | Server-side search combobox |
 | DB connections | `CONN_MAX_AGE=0` under ASGI (documented choice) means a connection per request | Add a pooler (ProxySQL / pgbouncer-like) |
 | Logging | DEBUG root logger to disk, no rotation | Rotate; INFO level |
+| Public WebSocket | 6 full-table aggregates per anonymous connection; signal handlers run `COUNT(*)` inside requests (M-41) | Cache stats; move work to Celery |
+| CSV exports | Whole tables serialized in one request (M-35) | Stream or generate in the background |
+| Profile rank | Loads every wallet id above the user's karma into Python (L-24) | Window function or cached rank |
+| Outbound calls | 19 of 25 `requests` calls have no timeout (M-51) | Shared session with timeouts |
+| Dev server in production | `runserver` + no timeouts = slow partner calls block users (H-35) | daphne/gunicorn with workers and timeouts |
+| Cached aggregates | Org/LC karma and rank columns are never refreshed because beat does not run (H-35, M-59) | Run beat; refresh once after deploy |
+| Karma logs | `UserLogAPI` returns all logs unpaginated (L-24) | Paginate |
 
 ---
 
@@ -1054,6 +1708,12 @@ Other notes:
 | Dashboard notification + broadcast work | `c4e2b89`…`4ac6876` | Built against endpoints and fields the backend does not provide (H-04, H-05) |
 | Dashboard unified Role Verification | `26a537c`, `ecc91c8` | Depends on an unmerged backend change (H-07) |
 | Auth server `feat/new-auth` (unmerged) | latest `b790491` | Large rewrite (OIDC, account API, internal API). It fixes C-08 and adds tests, but still has C-09 and weak OTP. Merging it changes URL layout (`muauth/urls/*`), so check every dashboard and backend auth call again before release |
+| Pagination helper now requires a QuerySet | `f9f35ef` (2026-08-30) | Five list APIs return 500, including two admin pages (H-26) — **not on `dev`** |
+| Task Templates modal redesign removed the `<Tabs>` root | dashboard `9246f1f` (2026-08-19) | Event Templates page crashes for every company (H-31) |
+| Company list APIs paginated, dashboard still expects arrays | backend `c4a8536` / `a91791e` (2026-07/08), dashboard company schemas | Collaborations and Feedback pages crash (H-30, H-32) — also true on backend `dev` |
+| `CircleInviteStatusAPI.get` never took `link_id` | present on `dev` and `pranav-dev` | Invite-link page never worked (H-27) |
+| `LearningCircle.name` → `title` | before `dev` | Public LC APIs broken on both branches (H-28) |
+| Intern module role lists (manage APIs open to `Intern`) | on both `dev` and `pranav-dev` (merged 2026-07-08, `abb34b1`) | C-10, H-21 — not new on `pranav-dev`, but live wherever the intern module is deployed |
 
 ---
 
@@ -1082,6 +1742,13 @@ These are cases where each repo looks fine alone but the pair is broken.
 14. **Token types** — H-18 (the auth server marks tokens with `tokenType`, but the backend never checks it, so refresh tokens work as access tokens).
 15. **Google redirect list** — M-25 (the dashboard builds the redirect URI from its own origin; the auth server's list has no staging domain).
 16. **Apple sign-in through the backend** — C-08 (the backend's `apple-mobile/` proxy forwards unsigned tokens to the vulnerable auth-server route).
+17. **Company list contracts** — H-30, H-32 (backend paginates, dashboard expects arrays; impact report shape differs).
+18. **Missing `company/user-status/` endpoint shadowed by `<company_id>/`** — H-33.
+19. **Role lists differ page by page** — M-38 (manage-interns), M-54 (intern pages), M-55 (zonal/district), M-56 (career labs), M-57 (talent pool). Suggestion: generate one role map (page → roles → API roles) from a shared JSON file and test it in both repos.
+20. **Pagination keys** — M-58 (`totalCount/currentPage/previousPage` in the dashboard vs `count/totalPages/isNext/isPrev/nextPage` in the backend).
+21. **Case of enum values in URLs** — L-52.
+22. **Nullable fields** — L-49 (the dashboard marks fields as required strings that the backend sends as `null`).
+23. **Public pages vs authenticated layout APIs** — H-34 (the proxy lets visitors in, the shared top bar calls a login-only API, and the client then forces a login).
 
 ---
 
@@ -1103,6 +1770,18 @@ These are cases where each repo looks fine alone but the pair is broken.
 | Registration pre-validation | `/register/validate/` missing (L-04) |
 | Role verification server filters | Backend (H-07) |
 | Event multi-status and real-time status | Backend (M-11) |
+| LC invite link page | Backend `get` has no `link_id` (H-27) |
+| Company collaborations / event templates / feedback | Pages crash (H-30, H-31, H-32) |
+| Company co-admin status | Endpoint missing (H-33) |
+| Public profile / muJourney / IG / events / search for visitors | Pages bounce to login (H-34) |
+| Scheduled jobs (event/session status, expiry of jobs/grants/applications, intern crons, alumni, org/LC aggregates) | Never run in the provided deployment (H-35, M-59) |
+| Change password in the dashboard | Endpoint exists, no screen (L-26) |
+| Intern pages for Intern Lead / Admin | Backend rejects them (M-54) |
+| Zonal/District dashboards for Admin | Backend rejects Admin; scope tied to college (M-55) |
+| User preferences PATCH (profile) | Serializer missing (M-48) |
+| Hackathon organisers | Always crashes (M-53) |
+| Top-100 leaderboard | Always crashes (M-49) |
+| Campus student list / member lists | Always crash (M-47) |
 
 ---
 
@@ -1148,6 +1827,32 @@ These are cases where each repo looks fine alone but the pair is broken.
 - A shared "contract" package (role names, routes, enums) used by both repos.
 - Production schema-mismatch telemetry in the dashboard.
 
+**Second-pass additions to the plan**
+
+**P0 — before any deploy**
+- C-10 and H-21: remove `Intern` from every `manage_interns` role list today; cap `karma_awarded`; block self-verification; audit karma already awarded through `#intern-task-verified` and review bonuses.
+- H-22: delete or lock `register/lc/user-validation/`.
+- H-23: stop self-verified org links; suspend campus roles on college change.
+- H-24: remove the global Mentor grant from the IG PATCH; make `code`/`status` admin-only.
+- H-29: unique `payment_id` + idempotent verify.
+- H-35, M-59: production app server (daphne/gunicorn), no code bind-mount, Celery beat service, every scheduled task registered; then run the aggregate crons once.
+
+**P1 — this sprint**
+- H-25, M-30, M-39, M-43, M-42 (karma and circle abuse).
+- H-26 (pagination helper), H-27, H-28 (LC), H-30…H-33 (company pages), H-34 (public pages), M-29, M-58 (wrong numbers).
+- M-33, M-34, M-36, M-37 (role and account safety).
+- M-38, M-54…M-57: one role map for pages and APIs.
+- M-40, M-41 (WebSockets), M-50 (token audience), M-51 (timeouts).
+
+**P2 — next sprint**
+- M-31, M-32, M-35, M-44…M-49, M-52, M-53.
+- L-10 (401 instead of 500), L-11 (405 instead of 500), L-12 (404 instead of 500).
+
+**P3 — clean-up**
+- L-13…L-52, dead code (L-44), lint (L-46).
+- Add contract tests: for each dashboard API function, validate a recorded backend response against its Zod schema in CI (the checker used for §5.6 can be reused).
+- Add the browser crawl used for §7 to CI as a smoke test (open every page as each role and fail on page errors or 5xx).
+
 ---
 
 ## 15. Final production-readiness assessment
@@ -1171,6 +1876,21 @@ These are cases where each repo looks fine alone but the pair is broken.
 3. The dashboard `vitest`, backend `pytest` and auth-server test suites run in CI and pass.
 4. A security test shows that a new account with a requested privileged role gets **no** extra rights, that forged Apple tokens are rejected, and that a refresh token is rejected as a Bearer token.
 5. A smoke test covers: login (password, OTP, Google) / refresh / logout through the real gateway, org verify/reject/merge, company sign-up with a real document, event create → approve → publish for each organiser type, role verification per tab, notification feed with links and broadcasts, and uploads at 4–5 MB.
+
+**Second-pass update.** The verdict stays **NOT production-ready**, and the list of blockers is longer:
+
+| Area | Status after the second pass |
+|---|---|
+| Authorization inside the backend | ❌ Low-privilege roles can reach high-privilege actions (C-10, H-21, H-23, H-24, M-36, M-37) |
+| Privacy | ❌ Anonymous PII lookup (H-22); smaller leaks (L-17, L-23, L-41, L-42) |
+| Karma integrity | ❌ At least six independent ways to inflate or lose karma (C-10, H-10, H-25, M-30, M-39, M-43) |
+| Payments | ❌ Replayable verification (H-29, M-44) |
+| Frontend | ❌ Three company pages crash on load; one LC page never works; all public pages bounce visitors to login; many role mismatches show error screens (H-27, H-30…H-34, M-38, M-54…M-57) |
+| API robustness | ⚠️ 263 route + method pairs return 500 for some input (most are 404/405/401 cases, Appendix G/H) |
+| Build | ✅ `next build` and typecheck pass; ❌ unit tests fail; no CI tests |
+| Deployment | ❌ Development server in production; no Celery beat; 6 scheduled tasks unregistered; broken roll-out workflow (H-35, M-59, L-53, L-54) |
+
+Add to the release gate: the browser crawl (§7) shows **no page errors and no 5xx** for any role on the pages that role can open, and the schema contract check (§5.6) shows **no mismatches**.
 
 ---
 
@@ -1197,10 +1917,18 @@ These come from the automated scan and were confirmed by reading the code. Some 
 | `/integrations/kkem/*` | POST/PATCH | KKEM | Token-based decorator on some |
 | `/launchpad/*` (user-college-link, bulk-user-college-link, user-profile, company-info, recruiter-info …) | POST/PUT | Launchpad | ❗ C-04 |
 | `/register/*`, `/dashboard/user/forgot-password/`, `reset-password/*`, `/donate/*`, `/auth/*` proxies | POST | – | Public by design (add rate limits) |
+| `/dashboard/profile/userterm-approved/<muid>/` | POST | `UsertermAPI` | ❗ L-02 |
+| `/register/lc/user-validation/` | POST | `LearningCircleUserViewAPI` | ❗ H-22 (returns email + phone) |
+| `/dashboard/organisation/karma-type/create/`, `karma-log/create/` | POST | Org karma | ❗ L-37 (500 after saving) |
+| `/integrations/kkem/login/` | POST | `KKEMIntegrationLogin` | Proxies password login to the auth server; add rate limits |
+| `/donate/verify/`, `/donate/subscription/verify/` | POST | Razorpay | ❗ H-29 replayable |
 
 ## Appendix B — Automated scan counts
 
-- Backend URL patterns: 733. Route/method pairs: 1,123 (901 authenticated, 14 optional auth, 208 no auth).
+- Backend URL patterns: 733 (728 unique). Unique route/method pairs: **1,123** (1140 rows including duplicate patterns).
+- Reachable without login: 172 (of which 44 change data). Used by the dashboard: 542. With at least one issue ID: 428.
+- Returned HTTP 500 for at least one role in the dynamic test: 263 route/method pairs (173 signature mismatches — Appendix H; 35 anonymous `IndexError` — L-10; the rest in Appendix G).
+- Requests sent by the dynamic harness: 21,660 (19 roles × every route and method).
 - Duplicate URL patterns: `dashboard/roles/`, `dashboard/roles/<roles_id>/`, `dashboard/user/<user_id>/` (×3), `dashboard/user/verification/<link_id>/`.
 - Routes removed from `dev` → `pranav-dev`: `notification/list/`, `notification/delete/id/<id>/`, `mentor/admin/deactivate|reactivate/<mentor_id>/` (param renamed). Method change: `learningcircle/meeting/rsvp/<id>/` added DELETE.
 
@@ -1217,3 +1945,1771 @@ Some of these are used through variables (for example `admin.tasks.*` inside `us
 | `bun run typecheck` | ✅ pass |
 | `bun run lint` (Biome) | ✅ pass, 50 warnings (mostly unused imports) |
 | `bunx vitest run` | ❌ 3 files failed / 36 passed; **14 tests failed** / 253 passed (all in `jobs.form.test.ts`); `events.policy.test.ts` is empty; `mujourney/utils/markdown.test.ts` is not a Vitest suite |
+| `next build` (production, Turbopack) | ✅ pass (123 static pages generated) |
+| Browser crawl (second pass) | 608+ page visits, see §7 and Appendix F |
+
+## Appendix E — Every backend endpoint (1,123 unique route + method pairs; 1,140 rows)
+
+Columns are explained in §5.5. `—` means nothing was seen. Issue IDs point to sections 2–4.
+#### `api` (1 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/schema/` | SpectacularAPIView | Login | none observed | — | — | — |
+
+#### `auth` (4 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| POST | `/api/v1/auth/user-authentication/` | UserAuthenticationProxyAPI | **Public** | any logged-in | features/auth/api/auth.api.ts:43, features/auth/api/auth.api.ts:58 | — | L-19 |
+| POST | `/api/v1/auth/google-mobile/` | GoogleMobileAuthProxyAPI | **Public** | any logged-in | — | — | L-19 |
+| POST | `/api/v1/auth/apple-mobile/` | AppleMobileAuthProxyAPI | **Public** | any logged-in | — | — | C-08, L-19 |
+| POST | `/api/v1/auth/refresh-token/` | RefreshTokenProxyAPI | **Public** | any logged-in | — | — | L-19 |
+
+#### `calendar` (7 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/calendar/ig-mentor/<str:ig_id>/sessions/` | IGMentorSessionCalendar | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/calendar/campus-mentor/<str:campus_id>/sessions/` | CampusMentorSessionCalendar | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/calendar/company/<str:company_org_id>/sessions/` | CompanySessionCalendar | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/calendar/events/` | EventCalendar | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/calendar/ig/<str:ig_id>/events/` | IGEventCalendar | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/calendar/campus/<str:campus_id>/events/` | CampusEventCalendar | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/calendar/company/<str:company_id>/events/` | CompanyEventCalendar | **Public** | any logged-in | — | — | — |
+
+#### `dashboard/achievement` (24 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/achievement/list/` | AchievementListAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:349, features/achievements/api/achievements.api.ts:44 | IndexError: list index out of range (anon) | L-10 |
+| GET | `/api/v1/dashboard/achievement/eligible/` | EligibleAchievementsAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:363 | IndexError: list index out of range (anon) | L-10 |
+| POST | `/api/v1/dashboard/achievement/claim/<str:achievement_id>/` | ClaimAchievementAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:383 | IndexError: list index out of range (anon) | L-10 |
+| GET | `/api/v1/dashboard/achievement/list/user/<str:muid>/` | UserAchievementsListAPIView | **Public** | any logged-in | features/achievements/api/achievements.api.ts:333, features/profile/api/profile.api.ts:456 | — | L-10 |
+| GET | `/api/v1/dashboard/achievement/progress/` | UserProgressAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:373 | IndexError: list index out of range (anon) | L-10 |
+| POST | `/api/v1/dashboard/achievement/create/` | AchievementCreateAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:55 | IndexError: list index out of range (anon) | C-02, L-10 |
+| PUT | `/api/v1/dashboard/achievement/update/<str:achievement_id>/` | AchievementUpdateAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:68 | IndexError: list index out of range (anon) | C-02, L-10 |
+| DELETE | `/api/v1/dashboard/achievement/delete/<str:achievement_id>/` | AchievementDeleteAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:77 | IndexError: list index out of range (anon) | C-02, L-10 |
+| GET | `/api/v1/dashboard/achievement/rules/` | AchievementRuleListAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:100 | IndexError: list index out of range (anon) | L-10 |
+| POST | `/api/v1/dashboard/achievement/rules/create/` | AchievementRuleCreateAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:110 | IndexError: list index out of range (anon) | C-02, L-10 |
+| GET | `/api/v1/dashboard/achievement/rules/<str:rule_id>/` | AchievementRuleDetailAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:156 | IndexError: list index out of range (anon) | L-10 |
+| PATCH | `/api/v1/dashboard/achievement/rules/<str:rule_id>/` | AchievementRuleDetailAPIView | Login (anon→500) | Admin | features/achievements/api/achievements.api.ts:126 | IndexError: list index out of range (anon) | L-10 |
+| POST | `/api/v1/dashboard/achievement/rules/<str:rule_id>/deactivate/` | AchievementRuleDeactivateAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:134 | IndexError: list index out of range (anon) | C-02, L-10 |
+| POST | `/api/v1/dashboard/achievement/rules/<str:rule_id>/activate/` | AchievementRuleActivateAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:142 | IndexError: list index out of range (anon) | C-02, L-10 |
+| GET | `/api/v1/dashboard/achievement/simulate/<str:muid>/` | SimulateRulesAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:170 | IndexError: list index out of range (anon) | L-10 |
+| GET | `/api/v1/dashboard/achievement/debug/<str:muid>/<str:achievement_id>/` | DebugAchievementAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:181 | IndexError: list index out of range (anon) | L-10 |
+| POST | `/api/v1/dashboard/achievement/manual-issue/` | ManualIssueAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:193 | IndexError: list index out of range (anon) | C-02, L-10 |
+| POST | `/api/v1/dashboard/achievement/revoke/` | RevokeAchievementAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:201 | IndexError: list index out of range (anon) | C-02, L-10 |
+| GET | `/api/v1/dashboard/achievement/audit/<str:muid>/` | AuditLogAPIView | Login (anon→500) | any logged-in | — | IndexError: list index out of range (anon) | L-10 |
+| POST | `/api/v1/dashboard/achievement/issue-vc/` | UserAchievementsIssueAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:228, features/profile/api/profile.api.ts:497 | IndexError: list index out of range (anon) | C-02, L-10 |
+| POST | `/api/v1/dashboard/achievement/bulk-issue/` | AchievementIssueBulkAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:215 | IndexError: list index out of range (anon) | C-02, L-10 |
+| GET | `/api/v1/dashboard/achievement/bulk-issue/template/` | AchievementBulkImportTemplateAPIView | **Public** | any logged-in | features/achievements/api/achievements.api.ts:236 | — | L-10 |
+| GET | `/api/v1/dashboard/achievement/issued-log/` | AchievementLogListAPIView | Login (anon→500) | any logged-in | features/achievements/api/achievements.api.ts:275 | IndexError: list index out of range (anon) | L-10 |
+| POST | `/api/v1/dashboard/achievement/bulk-claim/` | BulkClaimTaskAchievementAPIView | Login | none observed | — | — | L-10 |
+
+#### `dashboard/affiliation` (8 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/affiliation/` | AffiliationCRUDAPI | Login | any logged-in | features/organizations/api/affiliation.api.ts:29 | — | — |
+| POST | `/api/v1/dashboard/affiliation/` | AffiliationCRUDAPI | Login | Admin | features/organizations/api/affiliation.api.ts:41 | — | — |
+| PUT | `/api/v1/dashboard/affiliation/` | AffiliationCRUDAPI | Login | none observed | — | TypeError: AffiliationCRUDAPI.put() missing 1 required positional argu (admin) | — |
+| DELETE | `/api/v1/dashboard/affiliation/` | AffiliationCRUDAPI | Login | none observed | — | TypeError: AffiliationCRUDAPI.delete() missing 1 required positional a (admin) | — |
+| GET | `/api/v1/dashboard/affiliation/<str:affiliation_id>/` | AffiliationCRUDAPI | Login | ? (500) | — | TypeError: AffiliationCRUDAPI.get() got an unexpected keyword argument (admin,associate,campusiglead,campuslead,) | — |
+| POST | `/api/v1/dashboard/affiliation/<str:affiliation_id>/` | AffiliationCRUDAPI | Login | none observed | — | TypeError: AffiliationCRUDAPI.post() got an unexpected keyword argumen (admin) | — |
+| PUT | `/api/v1/dashboard/affiliation/<str:affiliation_id>/` | AffiliationCRUDAPI | Login | Admin | features/organizations/api/affiliation.api.ts:54 | — | — |
+| DELETE | `/api/v1/dashboard/affiliation/<str:affiliation_id>/` | AffiliationCRUDAPI | Login | Admin | features/organizations/api/affiliation.api.ts:64 | — | — |
+
+#### `dashboard/calendar` (1 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/calendar/events/` | DashboardCalendarAPI | **Public** | any logged-in | — | — | — |
+
+#### `dashboard/campus` (57 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/campus/home-summary/` | CampusDashboardSummaryAPIView | Login | any logged-in | features/home/api/home.api.ts:172 | — | — |
+| GET | `/api/v1/dashboard/campus/member-funnel/` | CampusMemberFunnelAPIView | Login | any logged-in | features/home/api/home.api.ts:181 | — | — |
+| GET | `/api/v1/dashboard/campus/circle-health/` | CampusCircleHealthAPIView | Login | any logged-in | features/home/api/home.api.ts:190 | — | — |
+| GET | `/api/v1/dashboard/campus/recent-activity/` | CampusRecentActivityAPIView | Login | any logged-in | — | — | — |
+| GET | `/api/v1/dashboard/campus/campus-list/` | CampusListAPI | Login | any logged-in | — | — | — |
+| GET | `/api/v1/dashboard/campus/campus-details/` | CampusDetailsAPI | Login | Campus Lead, Enabler, Lead Enabler, Mentor | features/campus-manage/api/campus-manage.api.ts:139 | — | — |
+| GET | `/api/v1/dashboard/campus/student-level/` | CampusStudentInEachLevelAPI | Login | any logged-in | features/campus-manage/api/campus-manage.api.ts:495 | — | — |
+| GET | `/api/v1/dashboard/campus/student-level/<str:org_id>/` | CampusStudentInEachLevelAPI | Login | any logged-in | — | — | L-42 |
+| GET | `/api/v1/dashboard/campus/student-details/` | CampusStudentDetailsAPI | Login | Campus Lead, Enabler, Lead Enabler, Mentor | — | — | — |
+| GET | `/api/v1/dashboard/campus/student-details/csv/` | CampusStudentDetailsCSVAPI | Login | Campus Lead, Enabler, Lead Enabler, Mentor | — | — | — |
+| GET | `/api/v1/dashboard/campus/weekly-karma/` | WeeklyKarmaAPI | Login | any logged-in | features/campus-manage/api/campus-manage.api.ts:140 | — | — |
+| GET | `/api/v1/dashboard/campus/weekly-karma/<str:org_id>/` | WeeklyKarmaAPI | Login | any logged-in | features/campus/api/campus.api.ts:18 | — | L-42 |
+| PATCH | `/api/v1/dashboard/campus/change-student-type/<str:member_id>/` | ChangeStudentTypeAPI | Login | none observed | features/campus-manage/api/campus-manage.api.ts:687 | NotImplementedError: `create()` must be implemented. (campuslead,leadenabler) | L-12 |
+| POST | `/api/v1/dashboard/campus/transfer-lead-role/` | TransferLeadRoleAPI | Login | Campus Lead, Lead Enabler | features/campus-manage/api/campus-manage.api.ts:608 | — | — |
+| POST | `/api/v1/dashboard/campus/transfer-enabler-role/` | TransferEnablerRoleAPI | Login | Campus Lead, Lead Enabler | features/campus-manage/api/campus-manage.api.ts:614 | — | — |
+| GET | `/api/v1/dashboard/campus/transfer-ig-role/` | TransferIGRoleAPI | Login | Campus Lead, Lead Enabler | features/campus-manage/api/campus-manage.api.ts:620 | — | — |
+| POST | `/api/v1/dashboard/campus/transfer-ig-role/` | TransferIGRoleAPI | Login | Campus Lead, Lead Enabler | features/campus-manage/api/campus-manage.api.ts:677 | — | — |
+| GET | `/api/v1/dashboard/campus/events/` | CampusEventsAPI | Login | Campus Lead, Enabler, Lead Enabler, Mentor | — | — | — |
+| GET | `/api/v1/dashboard/campus/events/distribution/` | CampusEventDistributionAPI | Login | Campus Lead, Enabler, Lead Enabler, Mentor | features/campus-manage/api/campus-manage.api.ts:390 | — | — |
+| GET | `/api/v1/dashboard/campus/execom/` | CampusExecomAPI | Login | Campus Lead, Enabler, Lead Enabler, Mentor | features/campus-manage/api/campus-manage.api.ts:508 | — | C-06 |
+| POST | `/api/v1/dashboard/campus/execom/` | CampusExecomAPI | Login | Campus Lead, Lead Enabler | features/campus-manage/api/campus-manage.api.ts:595 | — | C-06 |
+| DELETE | `/api/v1/dashboard/campus/execom/` | CampusExecomAPI | Login | Campus Lead, Lead Enabler | — | — | C-06 |
+| GET | `/api/v1/dashboard/campus/execom/roles/` | CampusExecomRoleAPI | Login | Campus Lead, Enabler, Lead Enabler, Mentor | features/campus-manage/api/campus-manage.api.ts:553 | — | C-06 |
+| POST | `/api/v1/dashboard/campus/execom/roles/` | CampusExecomRoleAPI | Login | Campus Lead, Lead Enabler | features/campus-manage/api/campus-manage.api.ts:577 | — | C-06 |
+| GET | `/api/v1/dashboard/campus/execom/search/` | CampusUserSearchAPI | Login | Campus Lead, Enabler, Lead Enabler, Mentor | — | — | C-06 |
+| GET | `/api/v1/dashboard/campus/execom/<str:member_id>/` | CampusExecomAPI | Login | none observed | — | TypeError: CampusExecomAPI.get() got an unexpected keyword argument 'm (campuslead,enabler,leadenabler,mentor) | C-06 |
+| POST | `/api/v1/dashboard/campus/execom/<str:member_id>/` | CampusExecomAPI | Login | none observed | — | TypeError: CampusExecomAPI.post() got an unexpected keyword argument ' (campuslead,leadenabler) | C-06 |
+| DELETE | `/api/v1/dashboard/campus/execom/<str:member_id>/` | CampusExecomAPI | Login | Campus Lead, Lead Enabler | features/campus-manage/api/campus-manage.api.ts:602 | — | C-06 |
+| GET | `/api/v1/dashboard/campus/ig-chapters/` | CampusIGChapterAPI | Login | Campus Lead, Enabler, Lead Enabler, Mentor | features/notification/api/notification.api.ts:152 | — | — |
+| POST | `/api/v1/dashboard/campus/ig-chapters/` | CampusIGChapterAPI | Login | Campus Lead, Lead Enabler | features/campus-manage/api/campus-manage.api.ts:735 | — | — |
+| PATCH | `/api/v1/dashboard/campus/ig-chapters/` | CampusIGChapterAPI | Login | none observed | — | TypeError: CampusIGChapterAPI.patch() missing 1 required positional ar (campuslead,leadenabler) | — |
+| DELETE | `/api/v1/dashboard/campus/ig-chapters/` | CampusIGChapterAPI | Login | none observed | — | TypeError: CampusIGChapterAPI.delete() missing 1 required positional a (campuslead,leadenabler) | — |
+| GET | `/api/v1/dashboard/campus/ig-chapters/<str:chapter_id>/` | CampusIGChapterAPI | Login | none observed | — | TypeError: CampusIGChapterAPI.get() got an unexpected keyword argument (campuslead,enabler,leadenabler,mentor) | — |
+| POST | `/api/v1/dashboard/campus/ig-chapters/<str:chapter_id>/` | CampusIGChapterAPI | Login | none observed | — | TypeError: CampusIGChapterAPI.post() got an unexpected keyword argumen (campuslead,leadenabler) | — |
+| PATCH | `/api/v1/dashboard/campus/ig-chapters/<str:chapter_id>/` | CampusIGChapterAPI | Login | Campus Lead, Lead Enabler | features/campus-manage/api/campus-manage.api.ts:747 | — | — |
+| DELETE | `/api/v1/dashboard/campus/ig-chapters/<str:chapter_id>/` | CampusIGChapterAPI | Login | Campus Lead, Lead Enabler | features/campus-manage/api/campus-manage.api.ts:754 | — | — |
+| POST | `/api/v1/dashboard/campus/ig-chapters/<str:chapter_id>/join/` | CampusIGChapterJoinAPI | Login | Admin, Campus IG Lead, Campus Lead, Enabler, Lead Enabler, Mentor, Student | — | — | — |
+| DELETE | `/api/v1/dashboard/campus/ig-chapters/<str:chapter_id>/leave/` | CampusIGChapterLeaveAPI | Login | Associate, Comic Admin, Company, Discord Mod, District Lead, Fellow, IG Lead, Intern, Intern Lead, Student, Tech Team, Zonal Lead | — | — | — |
+| PUT | `/api/v1/dashboard/campus/social-links/` | CampusSocialLinkAPI | Login | Campus Lead, Lead Enabler | features/campus-manage/api/campus-manage.api.ts:758 | — | — |
+| DELETE | `/api/v1/dashboard/campus/social-links/` | CampusSocialLinkAPI | Login | none observed | — | TypeError: CampusSocialLinkAPI.delete() missing 1 required positional  (campuslead,leadenabler) | — |
+| PUT | `/api/v1/dashboard/campus/social-links/<str:link_id>/` | CampusSocialLinkAPI | Login | none observed | — | TypeError: CampusSocialLinkAPI.put() got an unexpected keyword argumen (campuslead,leadenabler) | — |
+| DELETE | `/api/v1/dashboard/campus/social-links/<str:link_id>/` | CampusSocialLinkAPI | Login | Campus Lead, Lead Enabler | features/campus-manage/api/campus-manage.api.ts:762 | — | — |
+| GET | `/api/v1/dashboard/campus/student-list/` | CampusStudentListAPI | Login | none observed | — | ValueError: The annotation 'full_name' conflicts with a field on the m (campuslead,enabler,leadenabler,mentor) | M-47 |
+| GET | `/api/v1/dashboard/campus/students/<str:muid>/activity/` | CampusStudentActivityAPI | Login | Campus Lead, Enabler, Lead Enabler, Mentor | — | — | — |
+| GET | `/api/v1/dashboard/campus/igs/` | CampusIGsAPI | Login | Campus Lead, Enabler, Lead Enabler, Mentor | — | — | — |
+| GET | `/api/v1/dashboard/campus/igs/<str:ig_id>/members/` | CampusIGMembersAPI | Login | none observed | — | AttributeError: 'UserLvlLink' object has no attribute 'first' (campuslead,enabler,leadenabler,mentor) | M-47 |
+| GET | `/api/v1/dashboard/campus/learning-circles/` | CampusLearningCirclesAPI | Login | Campus Lead, Enabler, Lead Enabler, Mentor | — | — | — |
+| GET | `/api/v1/dashboard/campus/learning-circles/<str:circle_id>/members/` | CampusLCMembersAPI | Login | none observed | — | AttributeError: 'UserLvlLink' object has no attribute 'first' (campuslead,enabler,leadenabler,mentor) | M-47 |
+| GET | `/api/v1/dashboard/campus/analytics/karma-trend/` | CampusKarmaTrendAPI | Login | Campus Lead, Enabler, Lead Enabler, Mentor | — | — | — |
+| GET | `/api/v1/dashboard/campus/analytics/growth/` | CampusGrowthAPI | Login | Campus Lead, Enabler, Lead Enabler, Mentor | — | — | — |
+| GET | `/api/v1/dashboard/campus/showcase/` | CampusShowcaseAPI | Login | Campus Lead, Enabler, Lead Enabler, Mentor | — | — | — |
+| PATCH | `/api/v1/dashboard/campus/showcase/` | CampusShowcaseAPI | Login | Campus Lead, Lead Enabler | — | — | — |
+| POST | `/api/v1/dashboard/campus/assign-mentor/` | AssignCampusMentorAPI | Login | Campus Lead, Lead Enabler | features/campus/api/campus.api.ts:25 | — | — |
+| GET | `/api/v1/dashboard/campus/sessions/list/` | CampusSessionListAPI | Login | Admin, Campus IG Lead, Campus Lead, Enabler, Lead Enabler, Mentor, Student | — | — | — |
+| GET | `/api/v1/dashboard/campus/<str:org_id>/` | CampusDetailsPublicAPI | Login | any logged-in | features/campus/api/campus.api.ts:15 | — | L-42 |
+| GET | `/api/v1/dashboard/campus/<str:org_id>/leaderboard/` | CampusStudentLeaderboardAPI | Login | any logged-in | — | — | L-42 |
+| GET | `/api/v1/dashboard/campus/<str:org_id>/karma-by-cluster/` | CampusKarmaByClusterAPI | Login | any logged-in | — | — | L-42 |
+
+#### `dashboard/career-lab` (7 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/career-lab/hiring/` | HiringAPI | Login | Admin, Associate | features/career-labs/api/career-labs.api.ts:36 | — | — |
+| POST | `/api/v1/dashboard/career-lab/hiring/` | HiringAPI | Login | Admin, Associate | features/career-labs/api/career-labs.api.ts:44 | — | — |
+| GET | `/api/v1/dashboard/career-lab/hiring/csv/` | HiringCSVAPI | Login | Admin, Associate | features/career-labs/api/career-labs.api.ts:72 | — | — |
+| POST | `/api/v1/dashboard/career-lab/hiring/csv/` | HiringCSVAPI | Login | Admin, Associate | features/career-labs/api/career-labs.api.ts:91 | — | — |
+| GET | `/api/v1/dashboard/career-lab/hiring/<str:hiring_id>/` | HiringDetailAPI | Login | Admin, Associate | — | — | — |
+| PUT | `/api/v1/dashboard/career-lab/hiring/<str:hiring_id>/` | HiringDetailAPI | Login | Admin, Associate | features/career-labs/api/career-labs.api.ts:55 | — | — |
+| DELETE | `/api/v1/dashboard/career-lab/hiring/<str:hiring_id>/` | HiringDetailAPI | Login | Admin, Associate | features/career-labs/api/career-labs.api.ts:63 | — | — |
+
+#### `dashboard/category` (10 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/category/` | CategoryAPI | Login | any logged-in | — | — | — |
+| POST | `/api/v1/dashboard/category/` | CategoryAPI | Login | Admin | — | — | — |
+| PUT | `/api/v1/dashboard/category/` | CategoryAPI | Login | none observed | — | TypeError: CategoryAPI.put() missing 1 required positional argument: ' (admin) | — |
+| PATCH | `/api/v1/dashboard/category/` | CategoryAPI | Login | none observed | — | TypeError: CategoryAPI.patch() missing 1 required positional argument: (admin) | — |
+| DELETE | `/api/v1/dashboard/category/` | CategoryAPI | Login | none observed | — | TypeError: CategoryAPI.delete() missing 1 required positional argument (admin) | — |
+| GET | `/api/v1/dashboard/category/<str:category_id>/` | CategoryAPI | Login | any logged-in | — | — | — |
+| POST | `/api/v1/dashboard/category/<str:category_id>/` | CategoryAPI | Login | none observed | — | TypeError: CategoryAPI.post() got an unexpected keyword argument 'cate (admin) | — |
+| PUT | `/api/v1/dashboard/category/<str:category_id>/` | CategoryAPI | Login | Admin | — | — | — |
+| PATCH | `/api/v1/dashboard/category/<str:category_id>/` | CategoryAPI | Login | Admin | — | — | — |
+| DELETE | `/api/v1/dashboard/category/<str:category_id>/` | CategoryAPI | Login | Admin | — | — | — |
+
+#### `dashboard/channels` (8 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/channels/` | ChannelCRUDAPI | Login | any logged-in | features/channels/api/channels.api.ts:36 | — | — |
+| POST | `/api/v1/dashboard/channels/` | ChannelCRUDAPI | Login | Admin | features/channels/api/channels.api.ts:59 | — | — |
+| PUT | `/api/v1/dashboard/channels/` | ChannelCRUDAPI | Login | none observed | — | TypeError: ChannelCRUDAPI.put() missing 1 required positional argument (admin) | — |
+| DELETE | `/api/v1/dashboard/channels/` | ChannelCRUDAPI | Login | none observed | — | TypeError: ChannelCRUDAPI.delete() missing 1 required positional argum (admin) | — |
+| GET | `/api/v1/dashboard/channels/<str:channel_id>/` | ChannelCRUDAPI | Login | ? (500) | — | TypeError: ChannelCRUDAPI.get() got an unexpected keyword argument 'ch (admin,associate,campusiglead,campuslead,) | — |
+| POST | `/api/v1/dashboard/channels/<str:channel_id>/` | ChannelCRUDAPI | Login | none observed | — | TypeError: ChannelCRUDAPI.post() got an unexpected keyword argument 'c (admin) | — |
+| PUT | `/api/v1/dashboard/channels/<str:channel_id>/` | ChannelCRUDAPI | Login | Admin | features/channels/api/channels.api.ts:65 | — | — |
+| DELETE | `/api/v1/dashboard/channels/<str:channel_id>/` | ChannelCRUDAPI | Login | Admin | features/channels/api/channels.api.ts:53 | — | — |
+
+#### `dashboard/college` (3 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/college/` | CollegeApi | **Public** | any logged-in | features/college-levels/api/college.api.ts:26 | — | — |
+| PATCH | `/api/v1/dashboard/college/change-college/` | CollegeChangeAPI | Login (anon→500) | any logged-in | features/profile/api/profile.api.ts:419 | IndexError: list index out of range (anon) | H-23, L-10 |
+| GET | `/api/v1/dashboard/college/<str:college_code>/` | CollegeApi | **Public** | any logged-in | — | — | — |
+
+#### `dashboard/community-partner` (5 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/community-partner/` | CommunityPartnerListCreateAPI | **Public** | any logged-in | — | — | — |
+| POST | `/api/v1/dashboard/community-partner/` | CommunityPartnerListCreateAPI | Login | Admin, Associate, IG Lead | features/manage-ig/api/community-partner.api.ts:57 | — | — |
+| GET | `/api/v1/dashboard/community-partner/<str:partner_id>/` | CommunityPartnerDetailAPI | **Public** | any logged-in | features/manage-ig/api/community-partner.api.ts:70 | — | — |
+| PATCH | `/api/v1/dashboard/community-partner/<str:partner_id>/` | CommunityPartnerDetailAPI | Login | Admin, Associate, IG Lead | features/manage-ig/api/community-partner.api.ts:83 | — | — |
+| DELETE | `/api/v1/dashboard/community-partner/<str:partner_id>/` | CommunityPartnerDetailAPI | Login | Admin, Associate, IG Lead | features/manage-ig/api/community-partner.api.ts:93 | — | — |
+
+#### `dashboard/company` (80 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| POST | `/api/v1/dashboard/company/register/` | CompanyRegistrationAPI | Login | any logged-in | features/auth/api/register.api.ts:50 | — | C-05, M-19 |
+| PATCH | `/api/v1/dashboard/company/register/` | CompanyRegistrationAPI | Login | any logged-in | features/auth/api/register.api.ts:71 | — | C-05, M-19 |
+| GET | `/api/v1/dashboard/company/summary/` | CompanyAdminSummaryAPI | Login | Admin | features/company-jobs/api/jobs.api.ts:631 | — | — |
+| GET | `/api/v1/dashboard/company/home-summary/` | CompanyDashboardSummaryAPIView | Login | Company, Mentor | — | — | — |
+| GET | `/api/v1/dashboard/company/status/` | CompanyStatusAPI | Login | any logged-in | features/auth/api/auth.api.ts:152 | — | — |
+| GET | `/api/v1/dashboard/company/profile/` | CompanyProfileAPI | Login | Company, Mentor | features/company-jobs/api/jobs.api.ts:114 | — | — |
+| PATCH | `/api/v1/dashboard/company/profile/` | CompanyProfileAPI | Login | Company | features/company-jobs/api/jobs.api.ts:136, features/company-profile/api/company-profile.api.ts:35 | — | — |
+| GET | `/api/v1/dashboard/company/profile/public/<str:slug>/` | PublicCompanyProfileAPI | **Public** | any logged-in | features/company-jobs/api/jobs.api.ts:320 | — | — |
+| GET | `/api/v1/dashboard/company/profile/public/<str:slug>/jobs/` | PublicCompanyJobListAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/dashboard/company/list/` | CompanyListAPI | Login | Admin | features/manage-companies/api/manage-companies.api.ts:44 | — | — |
+| GET | `/api/v1/dashboard/company/jobs/` | CompanyJobAPI | Login | Company, Mentor | — | — | — |
+| POST | `/api/v1/dashboard/company/jobs/` | CompanyJobAPI | Login | Company, Mentor | features/company-jobs/api/jobs.api.ts:204 | — | — |
+| GET | `/api/v1/dashboard/company/jobs/pending/` | CompanyPendingJobListAPI | Login | Company | — | — | — |
+| GET | `/api/v1/dashboard/company/jobs/all/` | PublicJobAPI | Login | any logged-in | — | — | — |
+| GET | `/api/v1/dashboard/company/jobs/<str:job_id>/` | CompanyJobDetailAPI | Login | Company, Mentor | features/company-jobs/api/jobs.api.ts:183 | — | — |
+| PATCH | `/api/v1/dashboard/company/jobs/<str:job_id>/` | CompanyJobDetailAPI | Login | Company, Mentor | features/company-jobs/api/jobs.api.ts:216 | — | — |
+| DELETE | `/api/v1/dashboard/company/jobs/<str:job_id>/` | CompanyJobDetailAPI | Login | Company, Mentor | features/company-jobs/api/jobs.api.ts:225 | — | — |
+| POST | `/api/v1/dashboard/company/jobs/<str:job_id>/approve/` | CompanyJobApproveAPI | Login | Company | features/company-jobs/api/jobs.api.ts:731 | — | H-13 |
+| POST | `/api/v1/dashboard/company/jobs/<str:job_id>/reject/` | CompanyJobRejectAPI | Login | any logged-in | features/company-jobs/api/jobs.api.ts:739 | — | — |
+| POST | `/api/v1/dashboard/company/jobs/<str:job_id>/request-changes/` | CompanyJobRequestChangesAPI | Login | any logged-in | features/company-jobs/api/jobs.api.ts:750 | — | — |
+| POST | `/api/v1/dashboard/company/jobs/<str:job_id>/view/` | TrackJobViewAPIView | **Public** | any logged-in | features/company-jobs/api/jobs.api.ts:579 | — | L-47 |
+| GET | `/api/v1/dashboard/company/jobs/<str:job_id>/analytics/` | CompanyJobEngagementAnalyticsAPIView | Login | Company, Mentor | features/company-jobs/api/jobs.api.ts:597 | — | — |
+| GET | `/api/v1/dashboard/company/jobs/<str:job_id>/apply/` | JobApplicationAPI | Login | Company, Mentor | — | — | — |
+| POST | `/api/v1/dashboard/company/jobs/<str:job_id>/apply/` | JobApplicationAPI | Login | any logged-in | features/company-jobs/api/jobs.api.ts:412 | — | — |
+| GET | `/api/v1/dashboard/company/jobs/<str:job_id>/applications/` | JobApplicationAPI | Login | Company, Mentor | — | — | M-07 |
+| POST | `/api/v1/dashboard/company/jobs/<str:job_id>/applications/` | JobApplicationAPI | Login | any logged-in | — | — | — |
+| GET | `/api/v1/dashboard/company/applications/me/` | UserAppliedJobsAPI | Login | any logged-in | — | — | — |
+| PATCH | `/api/v1/dashboard/company/applications/<str:app_id>/status/` | ApplicationStatusAPI | Login | none observed | features/company-jobs/api/jobs.api.ts:481 | — | — |
+| DELETE | `/api/v1/dashboard/company/applications/<str:app_id>/withdraw/` | UserApplicationWithdrawAPI | Login | none observed | features/company-jobs/api/jobs.api.ts:420 | — | — |
+| PATCH | `/api/v1/dashboard/company/applications/<str:app_id>/resubmit/` | UserApplicationResubmitAPI | Login | none observed | features/company-jobs/api/jobs.api.ts:431 | — | — |
+| GET | `/api/v1/dashboard/company/mulearners/` | CompanyMulearnerDirectoryAPI | Login | Company, Mentor | — | — | L-41 |
+| GET | `/api/v1/dashboard/company/mulearners/shortlist/` | CompanyTalentShortlistAPI | Login | Company, Mentor | features/company-jobs/api/jobs.api.ts:798 | — | — |
+| POST | `/api/v1/dashboard/company/mulearners/shortlist/` | CompanyTalentShortlistAPI | Login | Company, Mentor | features/company-jobs/api/jobs.api.ts:811 | — | — |
+| DELETE | `/api/v1/dashboard/company/mulearners/shortlist/` | CompanyTalentShortlistAPI | Login | ? (500) | — | TypeError: CompanyTalentShortlistAPI.delete() missing 1 required posit (admin,associate,campusiglead,campuslead,) | — |
+| GET | `/api/v1/dashboard/company/mulearners/shortlist/<str:user_id>/` | CompanyTalentShortlistAPI | Login | ? (500) | — | TypeError: CompanyTalentShortlistAPI.get() got an unexpected keyword a (admin,associate,campusiglead,campuslead,) | — |
+| POST | `/api/v1/dashboard/company/mulearners/shortlist/<str:user_id>/` | CompanyTalentShortlistAPI | Login | ? (500) | — | TypeError: CompanyTalentShortlistAPI.post() got an unexpected keyword  (admin,associate,campusiglead,campuslead,) | — |
+| DELETE | `/api/v1/dashboard/company/mulearners/shortlist/<str:user_id>/` | CompanyTalentShortlistAPI | Login | Company, Mentor | features/company-jobs/api/jobs.api.ts:821 | — | — |
+| GET | `/api/v1/dashboard/company/analytics/gigs/` | CompanyGigAnalyticsAPI | Login | Company, Mentor | features/company-jobs/api/jobs.api.ts:535 | — | — |
+| GET | `/api/v1/dashboard/company/analytics/tasks/` | CompanyTaskAnalyticsAPI | Login | Company, Mentor | features/company-jobs/api/jobs.api.ts:786 | — | — |
+| GET | `/api/v1/dashboard/company/talent-pool/analytics/` | CompanyTalentPoolAnalyticsAPIView | Login | Company, Mentor | — | — | — |
+| GET | `/api/v1/dashboard/company/analytics/campus/trend/` | CompanyCampusTrendAPIView | Login | Company, Mentor | — | — | — |
+| GET | `/api/v1/dashboard/company/analytics/campus/` | CompanyCampusAnalyticsAPIView | Login | Company, Mentor | features/company-jobs/api/jobs.api.ts:760 | — | — |
+| GET | `/api/v1/dashboard/company/talent-pool/insights/` | CompanyTalentPoolInsightsAPIView | Login | Company, Mentor | features/company-jobs/api/jobs.api.ts:848 | — | — |
+| POST | `/api/v1/dashboard/company/feedback/` | CompanyFeedbackAPI | Login | any logged-in | features/company-jobs/api/jobs.api.ts:872 | — | — |
+| GET | `/api/v1/dashboard/company/feedback/list/` | CompanyFeedbackListAPI | Login | Company, Mentor | features/company-jobs/api/jobs.api.ts:881 | — | — |
+| GET | `/api/v1/dashboard/company/impact-report/` | CompanyImpactReportAPI | Login | Company, Mentor | features/company-jobs/api/jobs.api.ts:889 | — | — |
+| PATCH | `/api/v1/dashboard/company/impact-report/publish/` | CompanyImpactReportPublishAPI | Login | any logged-in | features/company-jobs/api/jobs.api.ts:899 | — | — |
+| GET | `/api/v1/dashboard/company/collaborations/` | CompanyCollaborationListCreateAPI | Login | Company | features/company-jobs/api/jobs.api.ts:910 | — | — |
+| POST | `/api/v1/dashboard/company/collaborations/` | CompanyCollaborationListCreateAPI | Login | any logged-in | features/company-jobs/api/jobs.api.ts:923 | — | — |
+| GET | `/api/v1/dashboard/company/collaborations/discover/` | CompanyCollaborationDiscoverAPI | Login | any logged-in | features/company-jobs/api/jobs.api.ts:934 | — | — |
+| POST | `/api/v1/dashboard/company/collaborations/<str:collaboration_id>/respond/` | CompanyCollaborationRespondAPI | Login | none observed | features/company-jobs/api/jobs.api.ts:945 | — | — |
+| DELETE | `/api/v1/dashboard/company/collaborations/<str:collaboration_id>/` | CompanyCollaborationWithdrawAPI | Login | none observed | features/company-jobs/api/jobs.api.ts:954 | — | — |
+| POST | `/api/v1/dashboard/company/ig-sponsorship/<str:ig_id>/` | IgSponsorshipRequestAPI | Login | any logged-in | features/company-jobs/api/jobs.api.ts:964 | — | — |
+| PATCH | `/api/v1/dashboard/company/ig-sponsorship/<str:ig_id>/review/` | IgSponsorshipReviewAPI | Login | Admin | features/company-jobs/api/jobs.api.ts:975 | — | — |
+| GET | `/api/v1/dashboard/company/ig-sponsorship/<str:ig_id>/metrics/` | IgSponsorshipMetricsAPI | Login | any logged-in | features/company-jobs/api/jobs.api.ts:985 | — | — |
+| GET | `/api/v1/dashboard/company/events/templates/` | CompanyEventTemplateListCreateAPI | Login | Company, Mentor | features/company-jobs/api/jobs.api.ts:995 | — | — |
+| POST | `/api/v1/dashboard/company/events/templates/` | CompanyEventTemplateListCreateAPI | Login | any logged-in | features/company-jobs/api/jobs.api.ts:1021 | — | — |
+| DELETE | `/api/v1/dashboard/company/events/templates/<str:template_id>/` | CompanyEventTemplateDetailAPI | Login | any logged-in | features/company-jobs/api/jobs.api.ts:1033 | — | — |
+| POST | `/api/v1/dashboard/company/admin-link/` | CompanyAdminLinkCreateAPI | Login | Company | features/company-jobs/api/jobs.api.ts:643 | — | — |
+| GET | `/api/v1/dashboard/company/admin-link/list/` | CompanyAdminLinkListAPI | Login | Company | features/company-jobs/api/jobs.api.ts:680 | — | — |
+| POST | `/api/v1/dashboard/company/admin-link/<str:link_id>/respond/` | CompanyAdminLinkAcceptAPI | Login | any logged-in | features/company-jobs/api/jobs.api.ts:655 | — | H-12 |
+| DELETE | `/api/v1/dashboard/company/admin-link/<str:link_id>/leave/` | CompanyAdminLinkLeaveAPI | Login | any logged-in | features/company-jobs/api/jobs.api.ts:672 | — | — |
+| DELETE | `/api/v1/dashboard/company/admin-link/<str:link_id>/` | CompanyAdminLinkRevokeAPI | Login | Company | features/company-jobs/api/jobs.api.ts:664 | — | — |
+| POST | `/api/v1/dashboard/company/mentor/nominate/` | CompanyMentorNominateAPI | Login | any logged-in | features/company-jobs/api/company-mentor.api.ts:117 | — | — |
+| POST | `/api/v1/dashboard/company/mentor/apply/` | CompanyMentorApplyAPI | Login | any logged-in | features/company-jobs/api/company-mentor.api.ts:138 | — | — |
+| GET | `/api/v1/dashboard/company/mentor/list/` | CompanyMentorListAPI | Login | any logged-in | features/company-jobs/api/company-mentor.api.ts:156 | — | — |
+| GET | `/api/v1/dashboard/company/tasks/` | CompanyTaskListCreateAPI | Login | Company, Mentor | — | — | — |
+| POST | `/api/v1/dashboard/company/tasks/` | CompanyTaskListCreateAPI | Login | Company, Mentor | features/company-jobs/api/company-tasks.api.ts:68, features/company-tasks/api/tasks.api.ts:118 | — | — |
+| GET | `/api/v1/dashboard/company/tasks/templates/` | CompanyTaskTemplateListCreateAPI | Login | Company, Mentor | features/company-tasks/api/tasks.api.ts:153 | — | — |
+| POST | `/api/v1/dashboard/company/tasks/templates/` | CompanyTaskTemplateListCreateAPI | Login | any logged-in | features/company-tasks/api/tasks.api.ts:175 | — | — |
+| DELETE | `/api/v1/dashboard/company/tasks/templates/<str:template_id>/` | CompanyTaskTemplateDetailAPI | Login | any logged-in | features/company-tasks/api/tasks.api.ts:187 | — | — |
+| GET | `/api/v1/dashboard/company/tasks/<str:task_id>/` | CompanyTaskDetailAPI | Login | Company, Mentor | features/company-jobs/api/company-tasks.api.ts:80, features/company-tasks/api/tasks.api.ts:124 | — | — |
+| PUT | `/api/v1/dashboard/company/tasks/<str:task_id>/` | CompanyTaskDetailAPI | Login | any logged-in | features/company-jobs/api/company-tasks.api.ts:95 | — | — |
+| PATCH | `/api/v1/dashboard/company/tasks/<str:task_id>/` | CompanyTaskDetailAPI | Login | any logged-in | features/company-tasks/api/tasks.api.ts:141 | — | — |
+| DELETE | `/api/v1/dashboard/company/tasks/<str:task_id>/` | CompanyTaskDetailAPI | Login | any logged-in | features/company-jobs/api/company-tasks.api.ts:106, features/company-tasks/api/tasks.api.ts:149 | — | — |
+| POST | `/api/v1/dashboard/company/deactivate/` | CompanyDeactivateAPI | Login | Company | features/company-jobs/api/jobs.api.ts:696 | — | — |
+| POST | `/api/v1/dashboard/company/<str:company_id>/deactivate/` | CompanyAdminDeactivateAPI | Login | Admin | features/manage-companies/api/manage-companies.api.ts:105 | — | — |
+| POST | `/api/v1/dashboard/company/<str:company_id>/reactivate/` | CompanyReactivateAPI | Login | Admin | features/manage-companies/api/manage-companies.api.ts:117 | — | — |
+| GET | `/api/v1/dashboard/company/<str:company_id>/` | CompanyDetailAPI | Login | Admin | features/company-jobs/api/jobs.api.ts:688, features/manage-companies/api/manage-companies.api.ts:82 | — | — |
+| PATCH | `/api/v1/dashboard/company/verify/<str:company_id>/` | CompanyVerifyAPI | Login | Admin | features/manage-companies/api/manage-companies.api.ts:67 | — | — |
+
+#### `dashboard/coupon` (1 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| POST | `/api/v1/dashboard/coupon/verify-coupon/` | CouponApi | **Public** | any logged-in | — | — | L-36 |
+
+#### `dashboard/discord-moderator` (3 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/discord-moderator/tasklist/` | TaskList | Login | ? (500) | features/discord-moderation/api/discord-moderation.api.ts:54 | AttributeError: Got AttributeError when attempting to get a value for  (admin,associate,campusiglead,campuslead,) | M-46 |
+| GET | `/api/v1/dashboard/discord-moderator/pendingcounts/` | PendingTasks | Login | any logged-in | — | — | — |
+| GET | `/api/v1/dashboard/discord-moderator/leaderboard/` | LeaderBoard | Login | ? (500) | features/discord-moderation/api/discord-moderation.api.ts:95 | AttributeError: 'list' object has no attribute '_fields' (admin,associate,campusiglead,campuslead,) | H-26 |
+
+#### `dashboard/district` (7 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/district/district-details/` | DistrictDetailAPI | Login | District Lead | features/district/api/district.api.ts:21 | — | M-24 |
+| GET | `/api/v1/dashboard/district/top-campus/` | DistrictTopThreeCampusAPI | Login | District Lead | features/district/api/district.api.ts:31 | — | M-24 |
+| GET | `/api/v1/dashboard/district/student-level/` | DistrictStudentLevelStatusAPI | Login | District Lead | features/district/api/district.api.ts:41 | — | M-24 |
+| GET | `/api/v1/dashboard/district/student-details/` | DistrictStudentDetailsAPI | Login | District Lead | features/district/api/district.api.ts:75 | — | M-24 |
+| GET | `/api/v1/dashboard/district/student-details/csv/` | DistrictStudentDetailsCSVAPI | Login | District Lead | features/district/api/district.api.ts:84 | — | M-24 |
+| GET | `/api/v1/dashboard/district/college-details/` | DistrictsCollageDetailsAPI | Login | District Lead | features/district/api/district.api.ts:116 | — | M-24 |
+| GET | `/api/v1/dashboard/district/college-details/csv/` | DistrictsCollageDetailsCSVAPI | Login | District Lead | features/district/api/district.api.ts:125 | — | M-24 |
+
+#### `dashboard/dynamic-management` (34 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/dynamic-management/dynamic-role/` | DynamicRoleAPI | Login | none observed | features/dynamic-type/api/dynamic-type.api.ts:96 | AttributeError: 'list' object has no attribute '_fields' (admin) | H-26 |
+| POST | `/api/v1/dashboard/dynamic-management/dynamic-role/` | DynamicRoleAPI | Login | Admin | — | — | — |
+| PATCH | `/api/v1/dashboard/dynamic-management/dynamic-role/` | DynamicRoleAPI | Login | none observed | — | TypeError: DynamicRoleAPI.patch() missing 1 required positional argume (admin) | — |
+| DELETE | `/api/v1/dashboard/dynamic-management/dynamic-role/` | DynamicRoleAPI | Login | none observed | — | TypeError: DynamicRoleAPI.delete() missing 1 required positional argum (admin) | — |
+| GET | `/api/v1/dashboard/dynamic-management/dynamic-role/create/` | DynamicRoleAPI | Login | none observed | — | AttributeError: 'list' object has no attribute '_fields' (admin) | — |
+| POST | `/api/v1/dashboard/dynamic-management/dynamic-role/create/` | DynamicRoleAPI | Login | Admin | features/dynamic-type/api/dynamic-type.api.ts:105 | — | — |
+| PATCH | `/api/v1/dashboard/dynamic-management/dynamic-role/create/` | DynamicRoleAPI | Login | none observed | — | TypeError: DynamicRoleAPI.patch() missing 1 required positional argume (admin) | — |
+| DELETE | `/api/v1/dashboard/dynamic-management/dynamic-role/create/` | DynamicRoleAPI | Login | none observed | — | TypeError: DynamicRoleAPI.delete() missing 1 required positional argum (admin) | — |
+| GET | `/api/v1/dashboard/dynamic-management/dynamic-role/delete/<str:type_id>/` | DynamicRoleAPI | Login | none observed | — | TypeError: DynamicRoleAPI.get() got an unexpected keyword argument 'ty (admin) | — |
+| POST | `/api/v1/dashboard/dynamic-management/dynamic-role/delete/<str:type_id>/` | DynamicRoleAPI | Login | none observed | — | TypeError: DynamicRoleAPI.post() got an unexpected keyword argument 't (admin) | — |
+| PATCH | `/api/v1/dashboard/dynamic-management/dynamic-role/delete/<str:type_id>/` | DynamicRoleAPI | Login | Admin | — | — | — |
+| DELETE | `/api/v1/dashboard/dynamic-management/dynamic-role/delete/<str:type_id>/` | DynamicRoleAPI | Login | Admin | features/dynamic-type/api/dynamic-type.api.ts:126 | — | — |
+| GET | `/api/v1/dashboard/dynamic-management/dynamic-role/update/<str:type_id>/` | DynamicRoleAPI | Login | none observed | — | TypeError: DynamicRoleAPI.get() got an unexpected keyword argument 'ty (admin) | — |
+| POST | `/api/v1/dashboard/dynamic-management/dynamic-role/update/<str:type_id>/` | DynamicRoleAPI | Login | none observed | — | TypeError: DynamicRoleAPI.post() got an unexpected keyword argument 't (admin) | — |
+| PATCH | `/api/v1/dashboard/dynamic-management/dynamic-role/update/<str:type_id>/` | DynamicRoleAPI | Login | Admin | features/dynamic-type/api/dynamic-type.api.ts:117 | — | — |
+| DELETE | `/api/v1/dashboard/dynamic-management/dynamic-role/update/<str:type_id>/` | DynamicRoleAPI | Login | Admin | — | — | — |
+| GET | `/api/v1/dashboard/dynamic-management/dynamic-user/` | DynamicUserAPI | Login | none observed | features/dynamic-type/api/dynamic-type.api.ts:138 | AttributeError: 'list' object has no attribute '_fields' (admin) | H-26 |
+| POST | `/api/v1/dashboard/dynamic-management/dynamic-user/` | DynamicUserAPI | Login | Admin | — | — | — |
+| PATCH | `/api/v1/dashboard/dynamic-management/dynamic-user/` | DynamicUserAPI | Login | none observed | — | TypeError: DynamicUserAPI.patch() missing 1 required positional argume (admin) | — |
+| DELETE | `/api/v1/dashboard/dynamic-management/dynamic-user/` | DynamicUserAPI | Login | none observed | — | TypeError: DynamicUserAPI.delete() missing 1 required positional argum (admin) | — |
+| GET | `/api/v1/dashboard/dynamic-management/dynamic-user/create/` | DynamicUserAPI | Login | none observed | — | AttributeError: 'list' object has no attribute '_fields' (admin) | — |
+| POST | `/api/v1/dashboard/dynamic-management/dynamic-user/create/` | DynamicUserAPI | Login | Admin | features/dynamic-type/api/dynamic-type.api.ts:147 | — | — |
+| PATCH | `/api/v1/dashboard/dynamic-management/dynamic-user/create/` | DynamicUserAPI | Login | none observed | — | TypeError: DynamicUserAPI.patch() missing 1 required positional argume (admin) | — |
+| DELETE | `/api/v1/dashboard/dynamic-management/dynamic-user/create/` | DynamicUserAPI | Login | none observed | — | TypeError: DynamicUserAPI.delete() missing 1 required positional argum (admin) | — |
+| GET | `/api/v1/dashboard/dynamic-management/dynamic-user/delete/<str:type_id>/` | DynamicUserAPI | Login | none observed | — | TypeError: DynamicUserAPI.get() got an unexpected keyword argument 'ty (admin) | — |
+| POST | `/api/v1/dashboard/dynamic-management/dynamic-user/delete/<str:type_id>/` | DynamicUserAPI | Login | none observed | — | TypeError: DynamicUserAPI.post() got an unexpected keyword argument 't (admin) | — |
+| PATCH | `/api/v1/dashboard/dynamic-management/dynamic-user/delete/<str:type_id>/` | DynamicUserAPI | Login | Admin | — | — | — |
+| DELETE | `/api/v1/dashboard/dynamic-management/dynamic-user/delete/<str:type_id>/` | DynamicUserAPI | Login | Admin | features/dynamic-type/api/dynamic-type.api.ts:168 | — | — |
+| GET | `/api/v1/dashboard/dynamic-management/dynamic-user/update/<str:type_id>/` | DynamicUserAPI | Login | none observed | — | TypeError: DynamicUserAPI.get() got an unexpected keyword argument 'ty (admin) | — |
+| POST | `/api/v1/dashboard/dynamic-management/dynamic-user/update/<str:type_id>/` | DynamicUserAPI | Login | none observed | — | TypeError: DynamicUserAPI.post() got an unexpected keyword argument 't (admin) | — |
+| PATCH | `/api/v1/dashboard/dynamic-management/dynamic-user/update/<str:type_id>/` | DynamicUserAPI | Login | Admin | features/dynamic-type/api/dynamic-type.api.ts:159 | — | — |
+| DELETE | `/api/v1/dashboard/dynamic-management/dynamic-user/update/<str:type_id>/` | DynamicUserAPI | Login | Admin | — | — | — |
+| GET | `/api/v1/dashboard/dynamic-management/types/` | DynamicTypeDropDownAPI | Login | any logged-in | features/dynamic-type/api/dynamic-type.api.ts:86 | — | — |
+| GET | `/api/v1/dashboard/dynamic-management/roles/` | RoleDropDownAPI | Login | any logged-in | features/dynamic-type/api/dynamic-type.api.ts:80 | — | — |
+
+#### `dashboard/enabler` (8 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/enabler/home-summary/` | EnablerHomeSummaryAPI | Login | Enabler, Lead Enabler | — | — | — |
+| GET | `/api/v1/dashboard/enabler/campuses/` | EnablerCampusListAPI | Login | Enabler, Lead Enabler | — | — | — |
+| GET | `/api/v1/dashboard/enabler/campuses/<str:campus_id>/review/` | EnablerCampusReviewAPI | Login | Enabler, Lead Enabler | — | — | — |
+| GET | `/api/v1/dashboard/enabler/campuses/<str:campus_id>/notes/` | EnablerCampusNoteAPI | Login | Enabler, Lead Enabler | — | — | — |
+| POST | `/api/v1/dashboard/enabler/campuses/<str:campus_id>/notes/` | EnablerCampusNoteAPI | Login | Enabler, Lead Enabler | — | — | — |
+| PATCH | `/api/v1/dashboard/enabler/campuses/<str:campus_id>/notes/` | EnablerCampusNoteAPI | Login | Enabler, Lead Enabler | — | — | — |
+| DELETE | `/api/v1/dashboard/enabler/campuses/<str:campus_id>/notes/` | EnablerCampusNoteAPI | Login | Enabler, Lead Enabler | — | — | — |
+| GET | `/api/v1/dashboard/enabler/reports/` | EnablerReportsAPI | Login | Enabler, Lead Enabler | — | — | — |
+
+#### `dashboard/error-log` (9 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/error-log/` | LoggerAPI | Login | Admin, Fellow, Tech Team | features/error-log/api/error-log.api.ts:75 | — | — |
+| PATCH | `/api/v1/dashboard/error-log/` | LoggerAPI | Login | none observed | — | TypeError: LoggerAPI.patch() missing 1 required positional argument: ' (admin,fellow,techteam) | — |
+| GET | `/api/v1/dashboard/error-log/graph/` | ErrorGraphAPI | Login | Admin | — | IndexError: list index out of range (fellow,techteam) | L-13 |
+| GET | `/api/v1/dashboard/error-log/tab/` | ErrorTabAPI | Login | Admin, Fellow, Tech Team | — | — | — |
+| GET | `/api/v1/dashboard/error-log/patch/<str:error_id>/` | LoggerAPI | Login | none observed | — | TypeError: LoggerAPI.get() got an unexpected keyword argument 'error_i (admin,fellow,techteam) | L-01 |
+| PATCH | `/api/v1/dashboard/error-log/patch/<str:error_id>/` | LoggerAPI | Login | Admin, Fellow, Tech Team | — | — | L-01 |
+| GET | `/api/v1/dashboard/error-log/<str:log_name>/` | DownloadErrorLogAPI | Login | Admin, Fellow, Tech Team | features/error-log/api/error-log.api.ts:89 | — | L-43 |
+| GET | `/api/v1/dashboard/error-log/view/<str:log_name>/` | ViewErrorLogAPI | Login | Admin, Fellow, Tech Team | — | — | L-43 |
+| POST | `/api/v1/dashboard/error-log/clear/<str:log_name>/` | ClearErrorLogAPI | Login | Admin, Fellow, Tech Team | features/error-log/api/error-log.api.ts:101 | — | L-43 |
+
+#### `dashboard/events` (51 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/events/meta/categories/` | EventCategoriesAPI | **Public** | any logged-in | features/events/api/events.api.ts:743 | — | — |
+| GET | `/api/v1/dashboard/events/meta/organizer-options/` | OrganizerOptionsAPI | Login | any logged-in | features/events/api/events.api.ts:735 | — | — |
+| GET | `/api/v1/dashboard/events/meta/collaboration-targets/` | CollaborationTargetsAPI | Login | any logged-in | features/events/api/events.api.ts:606 | — | — |
+| GET | `/api/v1/dashboard/events/meta/event-type-scope/` | EventTypesScopesAPI | **Public** | any logged-in | features/events/api/events.api.ts:751 | — | — |
+| GET | `/api/v1/dashboard/events/meta/linkable-events/` | LinkableEventsAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/dashboard/events/ig/cluster/<str:cluster>/` | ClusterEventListAPI | Login | any logged-in | features/events/api/events.api.ts:652 | — | — |
+| GET | `/api/v1/dashboard/events/ig/<str:ig_id>/` | IGEventListAPI | Login | any logged-in | features/events/api/events.api.ts:644 | — | — |
+| GET | `/api/v1/dashboard/events/campus/<str:campus_id>/` | CampusEventListAPI | Login | any logged-in | features/events/api/events.api.ts:662 | — | — |
+| GET | `/api/v1/dashboard/events/campus-ig/<str:campus_ig_id>/` | CampusIGEventListAPI | Login | any logged-in | features/events/api/events.api.ts:672 | — | — |
+| GET | `/api/v1/dashboard/events/company/<str:company_id>/` | CompanyEventListAPI | Login | any logged-in | features/events/api/events.api.ts:682 | — | — |
+| GET | `/api/v1/dashboard/events/admin/` | AdminEventListAPI | Login | Admin | features/notification/api/notification.api.ts:167 | — | — |
+| POST | `/api/v1/dashboard/events/admin/<str:event_id>/approve/` | AdminEventApproveAPI | Login | Admin | — | — | — |
+| POST | `/api/v1/dashboard/events/admin/<str:event_id>/reject/` | AdminEventRejectAPI | Login | Admin | — | — | — |
+| PATCH | `/api/v1/dashboard/events/admin/<str:event_id>/feature/` | AdminEventFeatureAPI | Login | Admin | features/events/api/events.api.ts:725 | — | — |
+| POST | `/api/v1/dashboard/events/mentor/<str:event_id>/approve/` | MentorEventApproveAPI | Login | Mentor | — | — | — |
+| POST | `/api/v1/dashboard/events/mentor/<str:event_id>/reject/` | MentorEventRejectAPI | Login | Mentor | — | — | — |
+| POST | `/api/v1/dashboard/events/campus/<str:event_id>/approve/` | CampusEventApproveAPI | Login | Admin, Campus Lead, Enabler, Lead Enabler | — | — | H-09 |
+| POST | `/api/v1/dashboard/events/campus/<str:event_id>/reject/` | CampusEventRejectAPI | Login | Admin, Campus Lead, Enabler, Lead Enabler | — | — | — |
+| POST | `/api/v1/dashboard/events/company/<str:event_id>/approve/` | CompanyEventApproveAPI | Login | any logged-in | — | — | — |
+| POST | `/api/v1/dashboard/events/company/<str:event_id>/reject/` | CompanyEventRejectAPI | Login | any logged-in | — | — | — |
+| GET | `/api/v1/dashboard/events/manage/` | ManageEventListCreateAPI | Login | any logged-in | — | — | M-10 |
+| POST | `/api/v1/dashboard/events/manage/` | ManageEventListCreateAPI | Login | Admin, Campus IG Lead, Campus Lead, Company, District Lead, Enabler, IG Lead, Lead Enabler, Zonal Lead | features/events/api/events.api.ts:459 | — | M-10 |
+| POST | `/api/v1/dashboard/events/manage/<str:event_id>/publish/` | ManageEventPublishAPI | Login | Admin, Enabler | features/events/api/events.api.ts:507 | — | M-10 |
+| GET | `/api/v1/dashboard/events/manage/<str:event_id>/co-owners/` | ManageEventCoOwnerAPI | Login | any logged-in | features/events/api/events.api.ts:516 | — | M-10 |
+| POST | `/api/v1/dashboard/events/manage/<str:event_id>/co-owners/` | ManageEventCoOwnerAPI | Login | any logged-in | features/events/api/events.api.ts:525 | — | M-10 |
+| DELETE | `/api/v1/dashboard/events/manage/<str:event_id>/co-owners/<str:co_owner_id>/` | ManageEventCoOwnerRemoveAPI | Login | any logged-in | features/events/api/events.api.ts:535 | — | M-10 |
+| GET | `/api/v1/dashboard/events/manage/<str:event_id>/collaborators/` | ManageEventCollaboratorAPI | Login | any logged-in | features/events/api/events.api.ts:546 | — | M-10 |
+| POST | `/api/v1/dashboard/events/manage/<str:event_id>/collaborators/` | ManageEventCollaboratorAPI | Login | any logged-in | features/events/api/events.api.ts:555 | — | M-10 |
+| POST | `/api/v1/dashboard/events/manage/<str:event_id>/collaborators/<str:collaborator_id>/accept/` | ManageEventCollaboratorAcceptAPI | Login | any logged-in | features/events/api/events.api.ts:565 | — | M-10 |
+| POST | `/api/v1/dashboard/events/manage/<str:event_id>/collaborators/<str:collaborator_id>/reject/` | ManageEventCollaboratorRejectAPI | Login | any logged-in | features/events/api/events.api.ts:576 | — | M-10 |
+| DELETE | `/api/v1/dashboard/events/manage/<str:event_id>/collaborators/<str:collaborator_id>/` | ManageEventCollaboratorRemoveAPI | Login | any logged-in | features/events/api/events.api.ts:586 | — | M-10 |
+| GET | `/api/v1/dashboard/events/manage/<str:event_id>/tasks/meta/` | EventTaskMetaAPI | Login | Admin, Enabler | — | — | M-10, H-25 |
+| GET | `/api/v1/dashboard/events/manage/<str:event_id>/tasks/<str:task_id>/` | EventTaskDetailAPI | Login | Admin, Enabler | — | — | M-10, H-25 |
+| PATCH | `/api/v1/dashboard/events/manage/<str:event_id>/tasks/<str:task_id>/` | EventTaskDetailAPI | Login | Admin, Enabler | — | — | M-10, H-25 |
+| DELETE | `/api/v1/dashboard/events/manage/<str:event_id>/tasks/<str:task_id>/` | EventTaskDetailAPI | Login | Admin, Enabler | — | — | M-10, H-25 |
+| GET | `/api/v1/dashboard/events/manage/<str:event_id>/tasks/` | EventTaskListCreateAPI | Login | Admin, Enabler | — | — | M-10, H-25 |
+| POST | `/api/v1/dashboard/events/manage/<str:event_id>/tasks/` | EventTaskListCreateAPI | Login | Admin, Enabler | — | — | M-10, H-25 |
+| GET | `/api/v1/dashboard/events/manage/<str:event_id>/analytics/` | EventAnalyticsAPI | Login | Admin, Enabler | — | — | M-10 |
+| GET | `/api/v1/dashboard/events/manage/<str:event_id>/` | ManageEventDetailAPI | Login | Admin, Enabler | features/events/api/events.api.ts:469 | — | M-10 |
+| PUT | `/api/v1/dashboard/events/manage/<str:event_id>/` | ManageEventDetailAPI | Login | Admin, Enabler | features/events/api/events.api.ts:479 | — | M-10 |
+| PATCH | `/api/v1/dashboard/events/manage/<str:event_id>/` | ManageEventDetailAPI | Login | Admin, Enabler | features/events/api/events.api.ts:491 | — | M-10 |
+| DELETE | `/api/v1/dashboard/events/manage/<str:event_id>/` | ManageEventDetailAPI | Login | Admin, Enabler | features/events/api/events.api.ts:501 | — | M-10 |
+| GET | `/api/v1/dashboard/events/my-invites/` | MyEventInvitesAPI | Login | any logged-in | features/events/api/events.api.ts:542 | — | — |
+| GET | `/api/v1/dashboard/events/calendar/` | EventCalendarAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/dashboard/events/featured/` | EventFeaturedAPI | Login | any logged-in | — | — | — |
+| GET | `/api/v1/dashboard/events/is-featured/` | EventFeaturedAPI | Login | any logged-in | — | — | — |
+| GET | `/api/v1/dashboard/events/tasks/` | EventTaskPublicListAPI | Login | any logged-in | — | — | — |
+| POST | `/api/v1/dashboard/events/<str:event_id>/interest/` | EventInterestAPI | Login | any logged-in | features/events/api/events.api.ts:438 | — | — |
+| DELETE | `/api/v1/dashboard/events/<str:event_id>/interest/` | EventInterestAPI | Login | any logged-in | features/events/api/events.api.ts:445 | — | — |
+| GET | `/api/v1/dashboard/events/<str:event_id>/` | EventDetailAPI | Login | any logged-in | — | — | — |
+| GET | `/api/v1/dashboard/events/` | EventListAPI | Login | any logged-in | — | — | M-11 |
+
+#### `dashboard/feature` (2 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/feature/grit-meter/` | GritMeterToggleAPI | Login | any logged-in | features/grit-meter/api/grit-meter.api.ts:12 | — | — |
+| POST | `/api/v1/dashboard/feature/grit-meter/` | GritMeterToggleAPI | Login | Admin | features/grit-meter/api/grit-meter.api.ts:21 | — | — |
+
+#### `dashboard/home` (2 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/home/learner/summary/` | LearnerDashboardSummaryAPIView | Login | any logged-in | features/home/api/home.api.ts:87 | — | — |
+| GET | `/api/v1/dashboard/home/learner/streak/` | LearnerStreakAPIView | Login | any logged-in | features/home/api/home.api.ts:160 | — | — |
+
+#### `dashboard/ig` (36 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/ig/` | InterestGroupAPI | Login | any logged-in | features/manage-ig/api/manage-ig.api.ts:70 | — | — |
+| POST | `/api/v1/dashboard/ig/` | InterestGroupAPI | Login | Admin, IG Lead | features/manage-ig/api/manage-ig.api.ts:87, features/manage-ig/api/manage-ig.api.ts:93 | — | — |
+| PUT | `/api/v1/dashboard/ig/` | InterestGroupAPI | Login | none observed | — | TypeError: InterestGroupAPI.put() missing 1 required positional argume (admin,iglead) | — |
+| DELETE | `/api/v1/dashboard/ig/` | InterestGroupAPI | Login | none observed | — | TypeError: InterestGroupAPI.delete() missing 1 required positional arg (admin,iglead) | — |
+| GET | `/api/v1/dashboard/ig/request/` | InterestGroupRequestAPI | Login | Admin, Company | features/manage-ig/api/manage-ig.api.ts:149 | — | M-08 |
+| POST | `/api/v1/dashboard/ig/request/` | InterestGroupRequestAPI | Login | Admin, Company | features/ig-requests/api/ig-requests.api.ts:62, features/manage-ig/api/manage-ig.api.ts:179 (+1) | — | M-08 |
+| PATCH | `/api/v1/dashboard/ig/request/` | InterestGroupRequestAPI | Login | none observed | — | TypeError: InterestGroupRequestAPI.patch() missing 1 required position (admin) | M-08 |
+| DELETE | `/api/v1/dashboard/ig/request/` | InterestGroupRequestAPI | Login | none observed | — | TypeError: InterestGroupRequestAPI.delete() missing 1 required positio (admin,company) | M-08 |
+| GET | `/api/v1/dashboard/ig/request/<str:pk>/` | InterestGroupRequestAPI | Login | none observed | — | TypeError: InterestGroupRequestAPI.get() got an unexpected keyword arg (admin,company) | M-08 |
+| POST | `/api/v1/dashboard/ig/request/<str:pk>/` | InterestGroupRequestAPI | Login | none observed | — | TypeError: InterestGroupRequestAPI.post() got an unexpected keyword ar (admin,company) | M-08 |
+| PATCH | `/api/v1/dashboard/ig/request/<str:pk>/` | InterestGroupRequestAPI | Login | Admin | features/ig-requests/api/ig-requests.api.ts:74, features/manage-ig/api/manage-ig.api.ts:160 | — | M-08 |
+| DELETE | `/api/v1/dashboard/ig/request/<str:pk>/` | InterestGroupRequestAPI | Login | Admin, Company | features/ig-requests/api/ig-requests.api.ts:82 | — | M-08 |
+| GET | `/api/v1/dashboard/ig/list/` | InterestGroupListApi | **Public** | any logged-in | features/campus-manage/api/campus-manage.api.ts:650, features/events/api/events.api.ts:629 (+5) | — | — |
+| GET | `/api/v1/dashboard/ig/csv/` | InterestGroupCSV | Login | Admin | features/manage-ig/api/manage-ig.api.ts:131 | — | — |
+| GET | `/api/v1/dashboard/ig/impact-projects/public/` | PublicImpactProjectListAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/dashboard/ig/<str:ig_id>/impact-projects/` | ImpactProjectListCreateAPI | Login | any logged-in | features/manage-ig/api/impact-projects.api.ts:18 | — | — |
+| POST | `/api/v1/dashboard/ig/<str:ig_id>/impact-projects/` | ImpactProjectListCreateAPI | Login | Admin, IG Lead | features/manage-ig/api/impact-projects.api.ts:29 | — | — |
+| PATCH | `/api/v1/dashboard/ig/<str:ig_id>/impact-projects/<str:project_id>/` | ImpactProjectDetailAPI | Login | Admin, IG Lead | features/manage-ig/api/impact-projects.api.ts:42 | — | — |
+| DELETE | `/api/v1/dashboard/ig/<str:ig_id>/impact-projects/<str:project_id>/` | ImpactProjectDetailAPI | Login | Admin, IG Lead | features/manage-ig/api/impact-projects.api.ts:54 | — | — |
+| POST | `/api/v1/dashboard/ig/<str:ig_id>/impact-projects/<str:project_id>/image/` | ImpactProjectImageAPI | Login | Admin, IG Lead | — | — | — |
+| POST | `/api/v1/dashboard/ig/<str:pk>/cover-image/` | InterestGroupImageAPI | Login | Admin, IG Lead | features/manage-ig/api/manage-ig.api.ts:202 | — | — |
+| DELETE | `/api/v1/dashboard/ig/<str:pk>/cover-image/` | InterestGroupImageAPI | Login | Admin, IG Lead | features/manage-ig/api/manage-ig.api.ts:212 | — | — |
+| POST | `/api/v1/dashboard/ig/<str:pk>/icon-image/` | InterestGroupImageAPI | Login | Admin, IG Lead | features/manage-ig/api/manage-ig.api.ts:222 | — | — |
+| DELETE | `/api/v1/dashboard/ig/<str:pk>/icon-image/` | InterestGroupImageAPI | Login | Admin, IG Lead | features/manage-ig/api/manage-ig.api.ts:232 | — | — |
+| GET | `/api/v1/dashboard/ig/<str:pk>/` | InterestGroupAPI | Login | ? (500) | — | TypeError: InterestGroupAPI.get() got an unexpected keyword argument ' (admin,associate,campusiglead,campuslead,) | — |
+| POST | `/api/v1/dashboard/ig/<str:pk>/` | InterestGroupAPI | Login | none observed | — | TypeError: InterestGroupAPI.post() got an unexpected keyword argument  (admin,iglead) | — |
+| PUT | `/api/v1/dashboard/ig/<str:pk>/` | InterestGroupAPI | Login | Admin, IG Lead | features/manage-ig/api/manage-ig.api.ts:105 | — | L-30 |
+| DELETE | `/api/v1/dashboard/ig/<str:pk>/` | InterestGroupAPI | Login | Admin, IG Lead | features/manage-ig/api/manage-ig.api.ts:119 | — | H-11, L-30 |
+| POST | `/api/v1/dashboard/ig/<str:pk>/activate/` | InterestGroupActivateAPIView | Login | Admin, IG Lead | features/manage-ig/api/manage-ig.api.ts:123 | — | M-37 |
+| POST | `/api/v1/dashboard/ig/<str:pk>/deactivate/` | InterestGroupDeactivateAPIView | Login | Admin, IG Lead | features/manage-ig/api/manage-ig.api.ts:127 | — | — |
+| GET | `/api/v1/dashboard/ig/get/<str:pk>/` | InterestGroupGetAPI | Login | Admin, IG Lead | — | — | — |
+| PATCH | `/api/v1/dashboard/ig/get/<str:pk>/` | InterestGroupGetAPI | Login | Admin, IG Lead | features/manage-ig/api/manage-ig.api.ts:112 | — | H-24 |
+| POST | `/api/v1/dashboard/ig/<str:pk>/join/` | InterestGroupMembershipAPI | Login | any logged-in | — | — | M-09, L-31 |
+| DELETE | `/api/v1/dashboard/ig/<str:pk>/join/` | InterestGroupMembershipAPI | Login | any logged-in | — | — | M-09, L-31 |
+| POST | `/api/v1/dashboard/ig/<str:pk>/leave/` | InterestGroupMembershipAPI | Login | any logged-in | — | — | M-09, L-31 |
+| DELETE | `/api/v1/dashboard/ig/<str:pk>/leave/` | InterestGroupMembershipAPI | Login | any logged-in | — | — | M-09, L-31 |
+
+#### `dashboard/intern` (49 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/intern/timesheets/` | InternTimesheetAPI | Login | Intern | features/intern/api/intern.api.ts:85 | — | — |
+| POST | `/api/v1/dashboard/intern/timesheets/` | InternTimesheetAPI | Login | Intern | features/intern/api/intern.api.ts:111 | — | — |
+| PATCH | `/api/v1/dashboard/intern/timesheets/` | InternTimesheetAPI | Login | none observed | — | TypeError: InternTimesheetAPI.patch() missing 1 required positional ar (intern) | — |
+| GET | `/api/v1/dashboard/intern/timesheets/prefill/` | InternTimesheetPrefillAPI | Login | Intern | features/intern/api/intern.api.ts:107 | — | — |
+| GET | `/api/v1/dashboard/intern/timesheets/today/` | InternTimesheetTodayAPI | Login | Intern | features/intern/api/intern.api.ts:122 | — | — |
+| GET | `/api/v1/dashboard/intern/timesheets/history/` | InternTimesheetHistoryAPI | Login | Intern | features/intern/api/intern.api.ts:129 | — | — |
+| GET | `/api/v1/dashboard/intern/timesheets/summary/` | InternTimesheetSummaryAPI | Login | Intern | features/intern/api/intern.api.ts:135 | — | — |
+| GET | `/api/v1/dashboard/intern/timesheets/<str:timesheet_id>/` | InternTimesheetAPI | Login | Intern | features/intern/api/intern.api.ts:91 | — | — |
+| POST | `/api/v1/dashboard/intern/timesheets/<str:timesheet_id>/` | InternTimesheetAPI | Login | none observed | — | TypeError: InternTimesheetAPI.post() got an unexpected keyword argumen (intern) | — |
+| PATCH | `/api/v1/dashboard/intern/timesheets/<str:timesheet_id>/` | InternTimesheetAPI | Login | Intern | features/intern/api/intern.api.ts:118 | — | — |
+| GET | `/api/v1/dashboard/intern/reviews/` | InternWeeklyReviewAPI | Login | Intern | features/intern/api/intern.api.ts:143 | — | — |
+| POST | `/api/v1/dashboard/intern/reviews/` | InternWeeklyReviewAPI | Login | Intern | features/intern/api/intern.api.ts:173 | — | — |
+| PATCH | `/api/v1/dashboard/intern/reviews/` | InternWeeklyReviewAPI | Login | none observed | — | TypeError: InternWeeklyReviewAPI.patch() missing 1 required positional (intern) | — |
+| GET | `/api/v1/dashboard/intern/reviews/prefill/` | InternWeeklyReviewPrefillAPI | Login | Intern | features/intern/api/intern.api.ts:167 | — | — |
+| GET | `/api/v1/dashboard/intern/reviews/current/` | InternWeeklyReviewCurrentAPI | Login | Intern | features/intern/api/intern.api.ts:184 | — | — |
+| GET | `/api/v1/dashboard/intern/reviews/history/` | InternWeeklyReviewHistoryAPI | Login | Intern | features/intern/api/intern.api.ts:191 | — | — |
+| GET | `/api/v1/dashboard/intern/reviews/<str:review_id>/` | InternWeeklyReviewAPI | Login | Intern | features/intern/api/intern.api.ts:149 | — | — |
+| POST | `/api/v1/dashboard/intern/reviews/<str:review_id>/` | InternWeeklyReviewAPI | Login | none observed | — | TypeError: InternWeeklyReviewAPI.post() got an unexpected keyword argu (intern) | — |
+| PATCH | `/api/v1/dashboard/intern/reviews/<str:review_id>/` | InternWeeklyReviewAPI | Login | Intern | features/intern/api/intern.api.ts:180 | — | — |
+| GET | `/api/v1/dashboard/intern/overview/status/` | InternOverviewStatusAPI | Login | Intern | features/intern/api/intern.api.ts:62 | — | — |
+| GET | `/api/v1/dashboard/intern/overview/activity/` | InternOverviewActivityAPI | Login | Intern | features/intern/api/intern.api.ts:71 | — | — |
+| GET | `/api/v1/dashboard/intern/overview/leaderboard/top/` | InternOverviewLeaderboardTopAPI | Login | Intern | features/intern/api/intern.api.ts:77 | — | — |
+| GET | `/api/v1/dashboard/intern/leaderboard/` | InternLeaderboardAPI | Login | Admin, Intern | features/intern/api/intern.api.ts:269 | — | — |
+| GET | `/api/v1/dashboard/intern/leaderboard/me/` | InternLeaderboardMeAPI | Login | Intern | features/intern/api/intern.api.ts:276 | — | — |
+| GET | `/api/v1/dashboard/intern/tasks/categories/` | InternTaskCategoryAPI | Login | Admin, Intern | features/intern/api/intern.api.ts:218 | — | — |
+| GET | `/api/v1/dashboard/intern/tasks/mine/` | InternTaskMineAPI | Login | Intern | features/intern/api/intern.api.ts:201 | — | — |
+| PATCH | `/api/v1/dashboard/intern/tasks/<str:task_id>/` | InternTaskSubmitAPI | Login | Intern | features/intern/api/intern.api.ts:211 | — | — |
+| PATCH | `/api/v1/dashboard/intern/tasks/<str:task_id>/submit/` | InternTaskSubmitAPI | Login | Intern | — | — | — |
+| GET | `/api/v1/dashboard/intern/tasks/<str:task_id>/detail/` | InternTaskDetailAPI | Login | Intern | features/intern/api/intern.api.ts:224 | — | — |
+| GET | `/api/v1/dashboard/intern/leave/` | InternLeaveRequestAPI | Login | Intern | features/intern/api/intern.api.ts:232 | — | — |
+| POST | `/api/v1/dashboard/intern/leave/` | InternLeaveRequestAPI | Login | Intern | features/intern/api/intern.api.ts:242 | — | — |
+| PATCH | `/api/v1/dashboard/intern/leave/` | InternLeaveRequestAPI | Login | Intern | — | — | — |
+| GET | `/api/v1/dashboard/intern/leave/history/` | InternLeaveHistoryAPI | Login | Intern | features/intern/api/intern.api.ts:255 | — | — |
+| GET | `/api/v1/dashboard/intern/leave/balance/` | InternLeaveBalanceAPI | Login | Intern | features/intern/api/intern.api.ts:261 | — | — |
+| GET | `/api/v1/dashboard/intern/leave/<str:leave_id>/` | InternLeaveRequestAPI | Login | Intern | features/intern/api/intern.api.ts:238 | — | — |
+| POST | `/api/v1/dashboard/intern/leave/<str:leave_id>/` | InternLeaveRequestAPI | Login | none observed | — | TypeError: InternLeaveRequestAPI.post() got an unexpected keyword argu (intern) | — |
+| PATCH | `/api/v1/dashboard/intern/leave/<str:leave_id>/` | InternLeaveRequestAPI | Login | Intern | features/intern/api/intern.api.ts:246 | — | — |
+| GET | `/api/v1/dashboard/intern/leave/<str:leave_id>/cancel/` | InternLeaveRequestAPI | Login | Intern | — | — | — |
+| POST | `/api/v1/dashboard/intern/leave/<str:leave_id>/cancel/` | InternLeaveRequestAPI | Login | none observed | — | TypeError: InternLeaveRequestAPI.post() got an unexpected keyword argu (intern) | — |
+| PATCH | `/api/v1/dashboard/intern/leave/<str:leave_id>/cancel/` | InternLeaveRequestAPI | Login | Intern | — | — | — |
+| GET | `/api/v1/dashboard/intern/guilds/` | InternGuildsAPI | Login | Admin, Intern | features/intern/api/intern.api.ts:289 | — | — |
+| GET | `/api/v1/dashboard/intern/minutes/` | InternGuildMinuteAPI | Login | Admin, Intern, Intern Lead | features/intern/api/intern.api.ts:308, features/intern/api/manage-interns.api.ts:212 | — | M-38 |
+| POST | `/api/v1/dashboard/intern/minutes/` | InternGuildMinuteAPI | Login | Admin, Intern Lead | features/intern/api/intern.api.ts:294 | — | M-38 |
+| PUT | `/api/v1/dashboard/intern/minutes/` | InternGuildMinuteAPI | Login | none observed | — | TypeError: InternGuildMinuteAPI.put() missing 1 required positional ar (admin,internlead) | M-38 |
+| DELETE | `/api/v1/dashboard/intern/minutes/` | InternGuildMinuteAPI | Login | none observed | — | TypeError: InternGuildMinuteAPI.delete() missing 1 required positional (admin,internlead) | M-38 |
+| GET | `/api/v1/dashboard/intern/minutes/<str:minute_id>/` | InternGuildMinuteAPI | Login | Admin, Intern, Intern Lead | — | — | M-38 |
+| POST | `/api/v1/dashboard/intern/minutes/<str:minute_id>/` | InternGuildMinuteAPI | Login | none observed | — | TypeError: InternGuildMinuteAPI.post() got an unexpected keyword argum (admin,internlead) | M-38 |
+| PUT | `/api/v1/dashboard/intern/minutes/<str:minute_id>/` | InternGuildMinuteAPI | Login | Admin, Intern Lead | features/intern/api/intern.api.ts:301 | — | M-38 |
+| DELETE | `/api/v1/dashboard/intern/minutes/<str:minute_id>/` | InternGuildMinuteAPI | Login | Admin, Intern Lead | — | — | M-38 |
+
+#### `dashboard/karma-voucher` (19 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/karma-voucher/` | VoucherLogAPI | Login | Admin, Associate, Fellow | features/karma-voucher/api/karma-voucher.api.ts:43 | — | — |
+| POST | `/api/v1/dashboard/karma-voucher/` | VoucherLogAPI | Login | Admin, Associate, Fellow | — | — | — |
+| PATCH | `/api/v1/dashboard/karma-voucher/` | VoucherLogAPI | Login | none observed | — | TypeError: VoucherLogAPI.patch() missing 1 required positional argumen (admin,associate,fellow) | — |
+| DELETE | `/api/v1/dashboard/karma-voucher/` | VoucherLogAPI | Login | none observed | — | TypeError: VoucherLogAPI.delete() missing 1 required positional argume (admin,associate,fellow) | — |
+| POST | `/api/v1/dashboard/karma-voucher/import/` | ImportVoucherLogAPI | Login | Admin, Associate, Fellow | features/karma-voucher/api/karma-voucher.api.ts:97 | — | — |
+| GET | `/api/v1/dashboard/karma-voucher/export/` | ExportVoucherLogAPI | Login | Admin, Associate, Fellow | features/karma-voucher/api/karma-voucher.api.ts:136 | — | — |
+| GET | `/api/v1/dashboard/karma-voucher/create/` | VoucherLogAPI | Login | Admin, Associate, Fellow | — | — | — |
+| POST | `/api/v1/dashboard/karma-voucher/create/` | VoucherLogAPI | Login | Admin, Associate, Fellow | features/karma-voucher/api/karma-voucher.api.ts:62 | — | — |
+| PATCH | `/api/v1/dashboard/karma-voucher/create/` | VoucherLogAPI | Login | none observed | — | TypeError: VoucherLogAPI.patch() missing 1 required positional argumen (admin,associate,fellow) | — |
+| DELETE | `/api/v1/dashboard/karma-voucher/create/` | VoucherLogAPI | Login | none observed | — | TypeError: VoucherLogAPI.delete() missing 1 required positional argume (admin,associate,fellow) | — |
+| GET | `/api/v1/dashboard/karma-voucher/update/<str:voucher_id>/` | VoucherLogAPI | Login | none observed | — | TypeError: VoucherLogAPI.get() got an unexpected keyword argument 'vou (admin,associate,fellow) | — |
+| POST | `/api/v1/dashboard/karma-voucher/update/<str:voucher_id>/` | VoucherLogAPI | Login | none observed | — | TypeError: VoucherLogAPI.post() got an unexpected keyword argument 'vo (admin,associate,fellow) | — |
+| PATCH | `/api/v1/dashboard/karma-voucher/update/<str:voucher_id>/` | VoucherLogAPI | Login | Admin, Associate, Fellow | features/karma-voucher/api/karma-voucher.api.ts:81 | — | — |
+| DELETE | `/api/v1/dashboard/karma-voucher/update/<str:voucher_id>/` | VoucherLogAPI | Login | Admin, Associate, Fellow | — | — | — |
+| GET | `/api/v1/dashboard/karma-voucher/delete/<str:voucher_id>/` | VoucherLogAPI | Login | none observed | — | TypeError: VoucherLogAPI.get() got an unexpected keyword argument 'vou (admin,associate,fellow) | — |
+| POST | `/api/v1/dashboard/karma-voucher/delete/<str:voucher_id>/` | VoucherLogAPI | Login | none observed | — | TypeError: VoucherLogAPI.post() got an unexpected keyword argument 'vo (admin,associate,fellow) | — |
+| PATCH | `/api/v1/dashboard/karma-voucher/delete/<str:voucher_id>/` | VoucherLogAPI | Login | Admin, Associate, Fellow | — | — | — |
+| DELETE | `/api/v1/dashboard/karma-voucher/delete/<str:voucher_id>/` | VoucherLogAPI | Login | Admin, Associate, Fellow | features/karma-voucher/api/karma-voucher.api.ts:87 | — | — |
+| GET | `/api/v1/dashboard/karma-voucher/base-template/` | VoucherBaseTemplateAPI | Login | ? (500) | features/karma-voucher/api/karma-voucher.api.ts:146 | FileNotFoundError: [Errno 2] No such file or directory: './excel-templ (admin,associate,campusiglead,campuslead,) | — |
+
+#### `dashboard/learningcircle` (61 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/learningcircle/create/` | LearningCircleView | Login | any logged-in | — | — | H-10 |
+| POST | `/api/v1/dashboard/learningcircle/create/` | LearningCircleView | Login | any logged-in | features/learning-circle/api/learning-circle.api.ts:127 | — | H-10, M-42 |
+| PUT | `/api/v1/dashboard/learningcircle/create/` | LearningCircleView | Login | ? (500) | — | TypeError: LearningCircleView.put() missing 1 required positional argu (admin,associate,campusiglead,campuslead,) | H-10 |
+| DELETE | `/api/v1/dashboard/learningcircle/create/` | LearningCircleView | Login | ? (500) | — | TypeError: LearningCircleView.delete() missing 1 required positional a (admin,associate,campusiglead,campuslead,) | H-10 |
+| GET | `/api/v1/dashboard/learningcircle/list/` | LearningCircleView | Login | any logged-in | — | — | H-10 |
+| POST | `/api/v1/dashboard/learningcircle/list/` | LearningCircleView | Login | any logged-in | — | — | H-10, M-42 |
+| PUT | `/api/v1/dashboard/learningcircle/list/` | LearningCircleView | Login | ? (500) | — | TypeError: LearningCircleView.put() missing 1 required positional argu (admin,associate,campusiglead,campuslead,) | H-10 |
+| DELETE | `/api/v1/dashboard/learningcircle/list/` | LearningCircleView | Login | ? (500) | — | TypeError: LearningCircleView.delete() missing 1 required positional a (admin,associate,campusiglead,campuslead,) | H-10 |
+| GET | `/api/v1/dashboard/learningcircle/info/<str:circle_id>/` | LearningCircleView | Login | any logged-in | features/learning-circle/api/learning-circle.api.ts:107 | — | — |
+| POST | `/api/v1/dashboard/learningcircle/info/<str:circle_id>/` | LearningCircleView | Login | ? (500) | — | TypeError: LearningCircleView.post() got an unexpected keyword argumen (admin,associate,campusiglead,campuslead,) | — |
+| PUT | `/api/v1/dashboard/learningcircle/info/<str:circle_id>/` | LearningCircleView | Login | Student | — | — | M-42 |
+| DELETE | `/api/v1/dashboard/learningcircle/info/<str:circle_id>/` | LearningCircleView | Login | Student | — | — | M-20 |
+| GET | `/api/v1/dashboard/learningcircle/members/<str:circle_id>/` | LearningCircleMemberDetailsView | **Public** | any logged-in | features/learning-circle/api/learning-circle.api.ts:118 | — | L-33 |
+| GET | `/api/v1/dashboard/learningcircle/edit/<str:circle_id>/` | LearningCircleView | Login | any logged-in | — | — | — |
+| POST | `/api/v1/dashboard/learningcircle/edit/<str:circle_id>/` | LearningCircleView | Login | ? (500) | — | TypeError: LearningCircleView.post() got an unexpected keyword argumen (admin,associate,campusiglead,campuslead,) | — |
+| PUT | `/api/v1/dashboard/learningcircle/edit/<str:circle_id>/` | LearningCircleView | Login | Student | features/learning-circle/api/learning-circle.api.ts:140 | — | M-42 |
+| DELETE | `/api/v1/dashboard/learningcircle/edit/<str:circle_id>/` | LearningCircleView | Login | Student | — | — | M-20 |
+| GET | `/api/v1/dashboard/learningcircle/delete/<str:circle_id>/` | LearningCircleView | Login | any logged-in | — | — | — |
+| POST | `/api/v1/dashboard/learningcircle/delete/<str:circle_id>/` | LearningCircleView | Login | ? (500) | — | TypeError: LearningCircleView.post() got an unexpected keyword argumen (admin,associate,campusiglead,campuslead,) | — |
+| PUT | `/api/v1/dashboard/learningcircle/delete/<str:circle_id>/` | LearningCircleView | Login | Student | — | — | M-42 |
+| DELETE | `/api/v1/dashboard/learningcircle/delete/<str:circle_id>/` | LearningCircleView | Login | Student | features/learning-circle/api/learning-circle.api.ts:149 | — | M-20 |
+| POST | `/api/v1/dashboard/learningcircle/meeting/create/<str:circle_id>/` | LearningCircleMeetingView | Login | Student | features/learning-circle/api/learning-circle.api.ts:387 | — | — |
+| PUT | `/api/v1/dashboard/learningcircle/meeting/create/<str:circle_id>/` | LearningCircleMeetingView | Login | ? (500) | — | TypeError: LearningCircleMeetingView.put() got an unexpected keyword a (admin,associate,campusiglead,campuslead,) | — |
+| DELETE | `/api/v1/dashboard/learningcircle/meeting/create/<str:circle_id>/` | LearningCircleMeetingView | Login | ? (500) | — | TypeError: LearningCircleMeetingView.delete() got an unexpected keywor (admin,associate,campusiglead,campuslead,) | — |
+| GET | `/api/v1/dashboard/learningcircle/meeting/list-public/` | LearningCircleMeetingPublicListView | Public? (anon→500) | ? (500) | — | OverflowError: date value out of range (admin,anon,associate,campusiglead,campus) | L-33 |
+| GET | `/api/v1/dashboard/learningcircle/meeting/list/` | LearningCircleMeetingListAPI | Login | ? (500) | — | OverflowError: date value out of range (admin,associate,campusiglead,campuslead,) | L-33 |
+| GET | `/api/v1/dashboard/learningcircle/meeting/list/<str:circle_id>/` | LearningCircleMeetingListView | **Public** | any logged-in | features/learning-circle/api/learning-circle.api.ts:319 | — | L-33 |
+| POST | `/api/v1/dashboard/learningcircle/meeting/edit/<str:meet_id>/` | LearningCircleMeetingView | Login | ? (500) | — | TypeError: LearningCircleMeetingView.post() got an unexpected keyword  (admin,associate,campusiglead,campuslead,) | — |
+| PUT | `/api/v1/dashboard/learningcircle/meeting/edit/<str:meet_id>/` | LearningCircleMeetingView | Login | Student | features/learning-circle/api/learning-circle.api.ts:408 | — | — |
+| DELETE | `/api/v1/dashboard/learningcircle/meeting/edit/<str:meet_id>/` | LearningCircleMeetingView | Login | Student | — | — | — |
+| GET | `/api/v1/dashboard/learningcircle/meeting/info/<str:meet_id>/` | LearningCircleMeetingInfoAPI | Login | any logged-in | features/learning-circle/api/learning-circle.api.ts:364 | — | — |
+| POST | `/api/v1/dashboard/learningcircle/meeting/delete/<str:meet_id>/` | LearningCircleMeetingView | Login | ? (500) | — | TypeError: LearningCircleMeetingView.post() got an unexpected keyword  (admin,associate,campusiglead,campuslead,) | — |
+| PUT | `/api/v1/dashboard/learningcircle/meeting/delete/<str:meet_id>/` | LearningCircleMeetingView | Login | Student | — | — | — |
+| DELETE | `/api/v1/dashboard/learningcircle/meeting/delete/<str:meet_id>/` | LearningCircleMeetingView | Login | Student | features/learning-circle/api/learning-circle.api.ts:417 | — | — |
+| POST | `/api/v1/dashboard/learningcircle/meeting/join/<str:meet_id>/` | LearningCircleJoinAPI | Login | any logged-in | features/learning-circle/api/learning-circle.api.ts:449 | — | H-10 |
+| DELETE | `/api/v1/dashboard/learningcircle/meeting/join/<str:meet_id>/` | LearningCircleJoinAPI | Login | any logged-in | — | — | H-10 |
+| POST | `/api/v1/dashboard/learningcircle/meeting/rsvp/<str:meet_id>/` | LearningCircleRSVPAPI | Login | any logged-in | features/learning-circle/api/learning-circle.api.ts:429 | — | — |
+| DELETE | `/api/v1/dashboard/learningcircle/meeting/rsvp/<str:meet_id>/` | LearningCircleRSVPAPI | Login | any logged-in | features/learning-circle/api/learning-circle.api.ts:438 | — | — |
+| POST | `/api/v1/dashboard/learningcircle/meeting/leave/<str:meet_id>/` | LearningCircleJoinAPI | Login | any logged-in | — | — | — |
+| DELETE | `/api/v1/dashboard/learningcircle/meeting/leave/<str:meet_id>/` | LearningCircleJoinAPI | Login | any logged-in | features/learning-circle/api/learning-circle.api.ts:458 | — | — |
+| GET | `/api/v1/dashboard/learningcircle/meeting/attendee-report/<str:meet_id>/` | LearningCircleAttendeeReportAPI | Login | any logged-in | features/learning-circle/api/learning-circle.api.ts:482 | — | H-10 |
+| POST | `/api/v1/dashboard/learningcircle/meeting/attendee-report/<str:meet_id>/` | LearningCircleAttendeeReportAPI | Login | any logged-in | features/learning-circle/api/learning-circle.api.ts:473 | — | H-10 |
+| DELETE | `/api/v1/dashboard/learningcircle/meeting/attendee-report/<str:meet_id>/` | LearningCircleAttendeeReportAPI | Login | any logged-in | features/learning-circle/api/learning-circle.api.ts:491 | — | H-10 |
+| GET | `/api/v1/dashboard/learningcircle/meeting/report/<str:meet_id>/` | LearningCircleReportAPI | Login | Student | features/learning-circle/api/learning-circle.api.ts:511 | — | H-10 |
+| POST | `/api/v1/dashboard/learningcircle/meeting/report/<str:meet_id>/` | LearningCircleReportAPI | Login | Student | features/learning-circle/api/learning-circle.api.ts:502 | — | H-10, L-34 |
+| DELETE | `/api/v1/dashboard/learningcircle/meeting/report/<str:meet_id>/` | LearningCircleReportAPI | Login | Student | features/learning-circle/api/learning-circle.api.ts:520 | — | H-10 |
+| GET | `/api/v1/dashboard/learningcircle/meeting/report/export/<str:meet_id>/` | LearningCircleReportExportAPI | Login | Student | — | — | H-10 |
+| GET | `/api/v1/dashboard/learningcircle/user-circles/` | UserCircleListAPI | Login | any logged-in | — | — | — |
+| GET | `/api/v1/dashboard/learningcircle/join/<str:circle_id>/` | CircleJoinAPI | Login | Student | features/learning-circle/api/learning-circle.api.ts:221 | — | — |
+| POST | `/api/v1/dashboard/learningcircle/join/<str:circle_id>/` | CircleJoinAPI | Login | any logged-in | features/learning-circle/api/learning-circle.api.ts:210 | — | — |
+| PATCH | `/api/v1/dashboard/learningcircle/join/<str:circle_id>/` | CircleJoinAPI | Login | Student | features/learning-circle/api/learning-circle.api.ts:233 | — | — |
+| POST | `/api/v1/dashboard/learningcircle/members/add/<str:circle_id>/` | CircleMemberAddAPI | Login | Student | features/learning-circle/api/learning-circle.api.ts:164 | — | M-43 |
+| DELETE | `/api/v1/dashboard/learningcircle/members/remove/<str:circle_id>/` | CircleMemberRemoveAPI | Login | Student | features/learning-circle/api/learning-circle.api.ts:188 | — | — |
+| DELETE | `/api/v1/dashboard/learningcircle/leave/<str:circle_id>/` | CircleLeaveAPI | Login | Student | features/learning-circle/api/learning-circle.api.ts:197 | — | — |
+| GET | `/api/v1/dashboard/learningcircle/invite/status/` | CircleInviteStatusAPI | Login | any logged-in | features/learning-circle/api/learning-circle.api.ts:274 | — | — |
+| POST | `/api/v1/dashboard/learningcircle/invite/status/` | CircleInviteStatusAPI | Login | any logged-in | features/learning-circle/api/learning-circle.api.ts:285 | — | — |
+| GET | `/api/v1/dashboard/learningcircle/invite/status/<str:link_id>/` | CircleInviteStatusAPI | Login | ? (500) | features/learning-circle/api/learning-circle.api.ts:294 | TypeError: CircleInviteStatusAPI.get() got an unexpected keyword argum (admin,associate,campusiglead,campuslead,) | H-27 |
+| POST | `/api/v1/dashboard/learningcircle/invite/status/<str:link_id>/` | CircleInviteStatusAPI | Login | any logged-in | features/learning-circle/api/learning-circle.api.ts:306 | — | — |
+| GET | `/api/v1/dashboard/learningcircle/invite/sent/<str:circle_id>/` | CircleSentInvitesAPI | Login | Student | features/learning-circle/api/learning-circle.api.ts:254 | — | — |
+| POST | `/api/v1/dashboard/learningcircle/invite/<str:circle_id>/` | CircleInviteAPI | Login | Student | features/learning-circle/api/learning-circle.api.ts:245 | — | L-32 |
+| POST | `/api/v1/dashboard/learningcircle/transfer-lead/<str:circle_id>/` | CircleTransferLeadAPI | Login | Student | features/learning-circle/api/learning-circle.api.ts:176 | — | — |
+
+#### `dashboard/location` (35 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/location/countries/` | CountryDataAPI | Login | Admin | features/manage-locations/api/locations.api.ts:76 | — | — |
+| POST | `/api/v1/dashboard/location/countries/` | CountryDataAPI | Login | Admin | features/manage-locations/api/locations.api.ts:84 | — | — |
+| PATCH | `/api/v1/dashboard/location/countries/` | CountryDataAPI | Login | none observed | — | TypeError: CountryDataAPI.patch() missing 1 required positional argume (admin) | — |
+| DELETE | `/api/v1/dashboard/location/countries/` | CountryDataAPI | Login | none observed | — | TypeError: CountryDataAPI.delete() missing 1 required positional argum (admin) | — |
+| GET | `/api/v1/dashboard/location/countries/list/` | CountryListApi | **Public** | any logged-in | features/manage-locations/api/locations.api.ts:106, features/organizations/api/organizations.api.ts:140 | — | — |
+| GET | `/api/v1/dashboard/location/countries/<str:country_id>/` | CountryDataAPI | Login | Admin | — | — | — |
+| POST | `/api/v1/dashboard/location/countries/<str:country_id>/` | CountryDataAPI | Login | none observed | — | TypeError: CountryDataAPI.post() got an unexpected keyword argument 'c (admin) | — |
+| PATCH | `/api/v1/dashboard/location/countries/<str:country_id>/` | CountryDataAPI | Login | Admin | features/manage-locations/api/locations.api.ts:94 | — | — |
+| DELETE | `/api/v1/dashboard/location/countries/<str:country_id>/` | CountryDataAPI | Login | Admin | features/manage-locations/api/locations.api.ts:102 | — | — |
+| GET | `/api/v1/dashboard/location/states/` | StateDataAPI | Login | Admin | features/manage-locations/api/locations.api.ts:118 | — | — |
+| POST | `/api/v1/dashboard/location/states/` | StateDataAPI | Login | Admin | features/manage-locations/api/locations.api.ts:126 | — | — |
+| PATCH | `/api/v1/dashboard/location/states/` | StateDataAPI | Login | none observed | — | TypeError: StateDataAPI.patch() missing 1 required positional argument (admin) | — |
+| DELETE | `/api/v1/dashboard/location/states/` | StateDataAPI | Login | none observed | — | TypeError: StateDataAPI.delete() missing 1 required positional argumen (admin) | — |
+| GET | `/api/v1/dashboard/location/states/list/` | StateListApi | **Public** | any logged-in | features/manage-locations/api/locations.api.ts:143, features/organizations/api/organizations.api.ts:147 | — | — |
+| GET | `/api/v1/dashboard/location/states/<str:state_id>/` | StateDataAPI | Login | Admin | — | — | — |
+| POST | `/api/v1/dashboard/location/states/<str:state_id>/` | StateDataAPI | Login | none observed | — | TypeError: StateDataAPI.post() got an unexpected keyword argument 'sta (admin) | — |
+| PATCH | `/api/v1/dashboard/location/states/<str:state_id>/` | StateDataAPI | Login | Admin | features/manage-locations/api/locations.api.ts:132 | — | — |
+| DELETE | `/api/v1/dashboard/location/states/<str:state_id>/` | StateDataAPI | Login | Admin | features/manage-locations/api/locations.api.ts:140 | — | — |
+| GET | `/api/v1/dashboard/location/zones/` | ZoneDataAPI | Login | Admin | features/manage-locations/api/locations.api.ts:154 | — | — |
+| POST | `/api/v1/dashboard/location/zones/` | ZoneDataAPI | Login | Admin | features/manage-locations/api/locations.api.ts:162 | — | — |
+| PATCH | `/api/v1/dashboard/location/zones/` | ZoneDataAPI | Login | none observed | — | TypeError: ZoneDataAPI.patch() missing 1 required positional argument: (admin) | — |
+| DELETE | `/api/v1/dashboard/location/zones/` | ZoneDataAPI | Login | none observed | — | TypeError: ZoneDataAPI.delete() missing 1 required positional argument (admin) | — |
+| GET | `/api/v1/dashboard/location/zones/list/` | ZoneListApi | **Public** | any logged-in | features/manage-locations/api/locations.api.ts:180 | — | — |
+| GET | `/api/v1/dashboard/location/zones/<str:zone_id>/` | ZoneDataAPI | Login | Admin | — | — | — |
+| POST | `/api/v1/dashboard/location/zones/<str:zone_id>/` | ZoneDataAPI | Login | none observed | — | TypeError: ZoneDataAPI.post() got an unexpected keyword argument 'zone (admin) | — |
+| PATCH | `/api/v1/dashboard/location/zones/<str:zone_id>/` | ZoneDataAPI | Login | Admin | features/manage-locations/api/locations.api.ts:168 | — | — |
+| DELETE | `/api/v1/dashboard/location/zones/<str:zone_id>/` | ZoneDataAPI | Login | Admin | features/manage-locations/api/locations.api.ts:176 | — | — |
+| GET | `/api/v1/dashboard/location/districts/` | DistrictDataAPI | Login | Admin | features/manage-locations/api/locations.api.ts:192 | — | — |
+| POST | `/api/v1/dashboard/location/districts/` | DistrictDataAPI | Login | Admin | features/manage-locations/api/locations.api.ts:200 | — | — |
+| PATCH | `/api/v1/dashboard/location/districts/` | DistrictDataAPI | Login | none observed | — | TypeError: DistrictDataAPI.patch() missing 1 required positional argum (admin) | — |
+| DELETE | `/api/v1/dashboard/location/districts/` | DistrictDataAPI | Login | none observed | — | TypeError: DistrictDataAPI.delete() missing 1 required positional argu (admin) | — |
+| GET | `/api/v1/dashboard/location/districts/<str:district_id>/` | DistrictDataAPI | Login | Admin | — | — | — |
+| POST | `/api/v1/dashboard/location/districts/<str:district_id>/` | DistrictDataAPI | Login | none observed | — | TypeError: DistrictDataAPI.post() got an unexpected keyword argument ' (admin) | — |
+| PATCH | `/api/v1/dashboard/location/districts/<str:district_id>/` | DistrictDataAPI | Login | Admin | features/manage-locations/api/locations.api.ts:210 | — | — |
+| DELETE | `/api/v1/dashboard/location/districts/<str:district_id>/` | DistrictDataAPI | Login | Admin | features/manage-locations/api/locations.api.ts:218 | — | — |
+
+#### `dashboard/manage-interns` (31 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/manage-interns/reviews/timesheets/<str:timesheet_id>/review/` | InternTimesheetReviewAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:166 | — | C-10, H-21, M-38 |
+| PATCH | `/api/v1/dashboard/manage-interns/reviews/timesheets/<str:timesheet_id>/review/` | InternTimesheetReviewAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:175 | — | C-10, H-21, M-38 |
+| GET | `/api/v1/dashboard/manage-interns/reviews/reviews/<str:review_id>/review/` | InternWeeklyReviewReviewAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:192 | — | C-10, H-21, M-38 |
+| PATCH | `/api/v1/dashboard/manage-interns/reviews/reviews/<str:review_id>/review/` | InternWeeklyReviewReviewAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:201 | — | C-10, H-21, M-38 |
+| GET | `/api/v1/dashboard/manage-interns/reviews/timesheets/` | InternTimesheetListAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:160 | — | C-10, H-21, M-38 |
+| GET | `/api/v1/dashboard/manage-interns/reviews/` | InternWeeklyReviewListAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:186 | — | C-10, H-21, M-38 |
+| GET | `/api/v1/dashboard/manage-interns/tasks/` | ManageInternTaskAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:91 | — | H-21, M-38 |
+| POST | `/api/v1/dashboard/manage-interns/tasks/` | ManageInternTaskAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:101 | — | H-21, M-38 |
+| PATCH | `/api/v1/dashboard/manage-interns/tasks/` | ManageInternTaskAPI | Login | none observed | — | TypeError: ManageInternTaskAPI.patch() missing 1 required positional a (admin,intern,internlead) | H-21, M-38 |
+| DELETE | `/api/v1/dashboard/manage-interns/tasks/` | ManageInternTaskAPI | Login | none observed | — | TypeError: ManageInternTaskAPI.delete() missing 1 required positional  (admin,intern,internlead) | H-21, M-38 |
+| GET | `/api/v1/dashboard/manage-interns/tasks/by-intern/<str:muid>/` | ManageInternTasksByInternAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:127 | — | H-21, M-38 |
+| POST | `/api/v1/dashboard/manage-interns/tasks/<str:task_id>/verify/` | ManageInternTaskVerifyAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:119 | — | C-10, H-21, M-38 |
+| GET | `/api/v1/dashboard/manage-interns/tasks/<str:task_id>/` | ManageInternTaskAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:97 | — | H-21, M-38 |
+| POST | `/api/v1/dashboard/manage-interns/tasks/<str:task_id>/` | ManageInternTaskAPI | Login | none observed | — | TypeError: ManageInternTaskAPI.post() got an unexpected keyword argume (admin,intern,internlead) | H-21, M-38 |
+| PATCH | `/api/v1/dashboard/manage-interns/tasks/<str:task_id>/` | ManageInternTaskAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:108 | — | H-21, M-38 |
+| DELETE | `/api/v1/dashboard/manage-interns/tasks/<str:task_id>/` | ManageInternTaskAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:112 | — | H-21, M-38 |
+| GET | `/api/v1/dashboard/manage-interns/leave/` | ManageInternLeaveAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:137 | — | H-21, M-38 |
+| GET | `/api/v1/dashboard/manage-interns/leave/<str:leave_id>/` | ManageInternLeaveAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:143 | — | H-21, M-38 |
+| PATCH | `/api/v1/dashboard/manage-interns/leave/<str:leave_id>/review/` | ManageInternLeaveReviewAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:152 | — | H-21, M-38 |
+| GET | `/api/v1/dashboard/manage-interns/status/` | ManageInternStatusAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:75 | — | H-21, M-38 |
+| GET | `/api/v1/dashboard/manage-interns/interns/export/` | ManageInternExportAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:81 | — | H-21, M-38 |
+| GET | `/api/v1/dashboard/manage-interns/interns/import/template/` | ManageInternBulkImportTemplateAPIView | Login | Admin | features/intern/api/manage-interns.api.ts:218 | — | H-21, M-38 |
+| POST | `/api/v1/dashboard/manage-interns/interns/import/` | ManageInternBulkImportAPI | Login | Admin | features/intern/api/manage-interns.api.ts:228 | — | H-21, M-38 |
+| GET | `/api/v1/dashboard/manage-interns/interns/` | ManageInternAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:48 | — | H-21, M-38 |
+| POST | `/api/v1/dashboard/manage-interns/interns/` | ManageInternAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:60 | — | H-21, M-38 |
+| PATCH | `/api/v1/dashboard/manage-interns/interns/` | ManageInternAPI | Login | none observed | — | TypeError: ManageInternAPI.patch() missing 1 required positional argum (admin,intern,internlead) | H-21, M-38 |
+| DELETE | `/api/v1/dashboard/manage-interns/interns/` | ManageInternAPI | Login | none observed | — | TypeError: ManageInternAPI.delete() missing 1 required positional argu (admin,intern,internlead) | H-21, M-38 |
+| GET | `/api/v1/dashboard/manage-interns/interns/<str:intern_id>/` | ManageInternAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:54 | — | H-21, M-38 |
+| POST | `/api/v1/dashboard/manage-interns/interns/<str:intern_id>/` | ManageInternAPI | Login | none observed | — | TypeError: ManageInternAPI.post() got an unexpected keyword argument ' (admin,intern,internlead) | H-21, M-38 |
+| PATCH | `/api/v1/dashboard/manage-interns/interns/<str:intern_id>/` | ManageInternAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:67 | — | H-21, M-38 |
+| DELETE | `/api/v1/dashboard/manage-interns/interns/<str:intern_id>/` | ManageInternAPI | Login | Admin, Intern, Intern Lead | features/intern/api/manage-interns.api.ts:71 | — | H-21, M-38 |
+
+#### `dashboard/media-content` (22 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/media-content/office-hours/` | OfficeHoursListCreateAPI | **Public** | any logged-in | features/weekly-twitches/api/weekly-twitches.api.ts:62 | — | — |
+| POST | `/api/v1/dashboard/media-content/office-hours/` | OfficeHoursListCreateAPI | Login | Admin, Associate, District Lead, IG Lead, Zonal Lead | features/weekly-twitches/api/weekly-twitches.api.ts:108, features/weekly-twitches/api/weekly-twitches.api.ts:116 | — | — |
+| GET | `/api/v1/dashboard/media-content/office-hours/<str:record_id>/` | OfficeHoursDetailAPI | **Public** | any logged-in | features/weekly-twitches/api/weekly-twitches.api.ts:72 | — | — |
+| PATCH | `/api/v1/dashboard/media-content/office-hours/<str:record_id>/` | OfficeHoursDetailAPI | Login | Admin, Associate, District Lead, IG Lead, Zonal Lead | features/weekly-twitches/api/weekly-twitches.api.ts:135, features/weekly-twitches/api/weekly-twitches.api.ts:143 | — | — |
+| DELETE | `/api/v1/dashboard/media-content/office-hours/<str:record_id>/` | OfficeHoursDetailAPI | Login | Admin, Associate, District Lead, IG Lead, Zonal Lead | features/weekly-twitches/api/weekly-twitches.api.ts:157 | — | — |
+| GET | `/api/v1/dashboard/media-content/salt-mango-tree/` | SaltMangoTreeListCreateAPI | **Public** | any logged-in | features/weekly-twitches/api/weekly-twitches.api.ts:169 | — | — |
+| POST | `/api/v1/dashboard/media-content/salt-mango-tree/` | SaltMangoTreeListCreateAPI | Login | Admin, Associate, District Lead, IG Lead, Zonal Lead | features/weekly-twitches/api/weekly-twitches.api.ts:185 | — | — |
+| GET | `/api/v1/dashboard/media-content/salt-mango-tree/<str:record_id>/` | SaltMangoTreeDetailAPI | **Public** | any logged-in | features/weekly-twitches/api/weekly-twitches.api.ts:177 | — | — |
+| PATCH | `/api/v1/dashboard/media-content/salt-mango-tree/<str:record_id>/` | SaltMangoTreeDetailAPI | Login | Admin, Associate, District Lead, IG Lead, Zonal Lead | features/weekly-twitches/api/weekly-twitches.api.ts:196 | — | — |
+| DELETE | `/api/v1/dashboard/media-content/salt-mango-tree/<str:record_id>/` | SaltMangoTreeDetailAPI | Login | Admin, Associate, District Lead, IG Lead, Zonal Lead | features/weekly-twitches/api/weekly-twitches.api.ts:204 | — | — |
+| GET | `/api/v1/dashboard/media-content/inspiration-station/` | InspirationStationListCreateAPI | **Public** | any logged-in | features/weekly-twitches/api/weekly-twitches.api.ts:216 | — | — |
+| POST | `/api/v1/dashboard/media-content/inspiration-station/` | InspirationStationListCreateAPI | Login | Admin, Associate, District Lead, IG Lead, Zonal Lead | features/weekly-twitches/api/weekly-twitches.api.ts:232 | — | — |
+| GET | `/api/v1/dashboard/media-content/inspiration-station/<str:record_id>/` | InspirationStationDetailAPI | **Public** | any logged-in | features/weekly-twitches/api/weekly-twitches.api.ts:224 | — | — |
+| PATCH | `/api/v1/dashboard/media-content/inspiration-station/<str:record_id>/` | InspirationStationDetailAPI | Login | Admin, Associate, District Lead, IG Lead, Zonal Lead | features/weekly-twitches/api/weekly-twitches.api.ts:243 | — | — |
+| DELETE | `/api/v1/dashboard/media-content/inspiration-station/<str:record_id>/` | InspirationStationDetailAPI | Login | Admin, Associate, District Lead, IG Lead, Zonal Lead | features/weekly-twitches/api/weekly-twitches.api.ts:251 | — | — |
+| GET | `/api/v1/dashboard/media-content/grab-your-superpowers/` | GrabYourSuperpowersListCreateAPI | **Public** | any logged-in | features/weekly-twitches/api/weekly-twitches.api.ts:261 | — | — |
+| POST | `/api/v1/dashboard/media-content/grab-your-superpowers/` | GrabYourSuperpowersListCreateAPI | Login | Admin, Associate, District Lead, IG Lead, Zonal Lead | features/weekly-twitches/api/weekly-twitches.api.ts:277 | — | — |
+| GET | `/api/v1/dashboard/media-content/grab-your-superpowers/<str:record_id>/` | GrabYourSuperpowersDetailAPI | **Public** | any logged-in | features/weekly-twitches/api/weekly-twitches.api.ts:269 | — | — |
+| PATCH | `/api/v1/dashboard/media-content/grab-your-superpowers/<str:record_id>/` | GrabYourSuperpowersDetailAPI | Login | Admin, Associate, District Lead, IG Lead, Zonal Lead | features/weekly-twitches/api/weekly-twitches.api.ts:294 | — | — |
+| DELETE | `/api/v1/dashboard/media-content/grab-your-superpowers/<str:record_id>/` | GrabYourSuperpowersDetailAPI | Login | Admin, Associate, District Lead, IG Lead, Zonal Lead | features/weekly-twitches/api/weekly-twitches.api.ts:308 | — | — |
+| POST | `/api/v1/dashboard/media-content/bulk/import/` | MediaContentBulkImportAPI | Login | Admin, Associate, District Lead, IG Lead, Zonal Lead | — | — | — |
+| GET | `/api/v1/dashboard/media-content/bulk/export/<str:content_type>/` | MediaContentBulkExportAPI | Login | Admin, Associate, District Lead, IG Lead, Zonal Lead | — | — | — |
+
+#### `dashboard/mentor` (71 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/mentor/opportunities/` | IgOpportunityListCreateAPI | Login | Mentor | — | — | — |
+| POST | `/api/v1/dashboard/mentor/opportunities/` | IgOpportunityListCreateAPI | Login | Mentor | — | — | — |
+| GET | `/api/v1/dashboard/mentor/opportunities/public/` | PublicIgOpportunityListAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/dashboard/mentor/opportunities/<str:opportunity_id>/` | IgOpportunityDetailAPI | Login | Mentor | — | — | — |
+| PATCH | `/api/v1/dashboard/mentor/opportunities/<str:opportunity_id>/` | IgOpportunityDetailAPI | Login | Mentor | — | — | — |
+| DELETE | `/api/v1/dashboard/mentor/opportunities/<str:opportunity_id>/` | IgOpportunityDetailAPI | Login | Mentor | — | — | — |
+| POST | `/api/v1/dashboard/mentor/opportunities/<str:opportunity_id>/publish/` | IgOpportunityPublishAPI | Login | Mentor | — | — | — |
+| POST | `/api/v1/dashboard/mentor/opportunities/<str:opportunity_id>/close/` | IgOpportunityCloseAPI | Login | Mentor | — | — | — |
+| GET | `/api/v1/dashboard/mentor/public/profile/<str:mentor_id>/` | MentorPublicProfileAPI | Login | any logged-in | features/mentor/public/api/public-mentor.api.ts:20 | — | — |
+| GET | `/api/v1/dashboard/mentor/public/availability/<str:mentor_id>/` | MentorPublicAvailabilityAPI | Login | any logged-in | features/mentor/public/api/public-mentor.api.ts:35 | — | — |
+| GET | `/api/v1/dashboard/mentor/overview/` | MentorOverviewAPI | Login | any logged-in | features/home/api/home.api.ts:48, features/mentor/api/mentor.api.ts:229 | — | — |
+| GET | `/api/v1/dashboard/mentor/persona/current/` | PersonaCurrentAPI | Login | any logged-in | features/mentor/api/mentor.api.ts:268 | — | — |
+| POST | `/api/v1/dashboard/mentor/register/` | MentorRegistrationAPI | Login | any logged-in | features/mentor/onboarding/api/onboarding.api.ts:27 | — | — |
+| PATCH | `/api/v1/dashboard/mentor/register/` | MentorRegistrationAPI | Login | any logged-in | features/mentor/onboarding/api/onboarding.api.ts:41 | — | — |
+| GET | `/api/v1/dashboard/mentor/status/` | MentorStatusAPI | Login | any logged-in | features/mentor/onboarding/api/onboarding.api.ts:14 | — | — |
+| GET | `/api/v1/dashboard/mentor/profile/` | MentorProfileAPI | Login | Mentor | features/mentor/onboarding/api/onboarding.api.ts:53 | — | — |
+| PATCH | `/api/v1/dashboard/mentor/profile/` | MentorProfileAPI | Login | Mentor | features/mentor/onboarding/api/onboarding.api.ts:66 | — | — |
+| GET | `/api/v1/dashboard/mentor/activity/` | MentorActivityListAPI | Login | none observed | — | AttributeError: 'list' object has no attribute '_fields' (campuslead,leadenabler,mentor) | H-26 |
+| GET | `/api/v1/dashboard/mentor/analytics/personal/` | MentorPersonalAnalyticsAPI | Login | Mentor | features/mentor/api/mentor.api.ts:410 | — | — |
+| GET | `/api/v1/dashboard/mentor/profile/completion/` | MentorProfileCompletionAPI | Login | Mentor | features/mentor/api/mentor.api.ts:339 | — | — |
+| GET | `/api/v1/dashboard/mentor/list/` | MentorListAPI | Login | Admin | — | — | — |
+| GET | `/api/v1/dashboard/mentor/roster/` | MentorRosterAPI | Login | Admin | — | — | — |
+| GET | `/api/v1/dashboard/mentor/change-requests/` | MentorChangeRequestListAPI | Login | Admin | — | — | — |
+| PATCH | `/api/v1/dashboard/mentor/verify/<str:mentor_id>/` | MentorVerifyAPI | Login | Admin, IG Lead, Mentor | features/mentor/admin/api/mentor-verify.api.ts:149 | — | — |
+| GET | `/api/v1/dashboard/mentor/detail/<str:mentor_id>/` | MentorDetailAPI | Login | Admin | features/mentor/admin/api/mentor-verify.api.ts:136 | — | — |
+| POST | `/api/v1/dashboard/mentor/session/create/` | MentorSessionCreateAPI | Login | Mentor | features/mentor/sessions/api/sessions.api.ts:158 | — | — |
+| GET | `/api/v1/dashboard/mentor/session/list/` | MentorSessionListAPI | Login | Mentor | features/mentor/sessions/api/sessions.api.ts:182 | — | — |
+| GET | `/api/v1/dashboard/mentor/session/list/<str:session_id>/` | MentorSessionListAPI | Login | Mentor | features/mentor/sessions/api/sessions.api.ts:196 | — | — |
+| PATCH | `/api/v1/dashboard/mentor/session/update/<str:session_id>/` | MentorSessionUpdateAPI | Login | Mentor | features/mentor/sessions/api/sessions.api.ts:209 | — | — |
+| DELETE | `/api/v1/dashboard/mentor/session/update/<str:session_id>/` | MentorSessionUpdateAPI | Login | Mentor | features/mentor/sessions/api/sessions.api.ts:219 | — | — |
+| POST | `/api/v1/dashboard/mentor/session/complete/<str:session_id>/` | MentorSessionCompleteAPI | Login | Mentor | features/mentor/sessions/api/sessions.api.ts:229 | — | — |
+| GET | `/api/v1/dashboard/mentor/session/available/` | AvailableSessionListAPI | Login | any logged-in | features/mentor/sessions/api/sessions.api.ts:247 | — | — |
+| GET | `/api/v1/dashboard/mentor/session/admin/list/` | AdminSessionListAPI | Login | Admin | features/mentor/sessions/api/sessions.api.ts:278 | — | — |
+| PATCH | `/api/v1/dashboard/mentor/session/admin/verify/<str:session_id>/` | AdminSessionVerifyAPI | Login | Admin | features/home/api/home.api.ts:231, features/mentor/sessions/api/sessions.api.ts:301 | — | — |
+| GET | `/api/v1/dashboard/mentor/availability/` | MentorAvailabilitySlotAPI | Login | Mentor | features/mentor/api/mentor.api.ts:102, features/mentor/api/mentor.api.ts:130 (+1) | — | — |
+| POST | `/api/v1/dashboard/mentor/availability/` | MentorAvailabilitySlotAPI | Login | Mentor | features/mentor/api/mentor.api.ts:175, features/mentor/api/mentor.api.ts:203 | — | — |
+| PATCH | `/api/v1/dashboard/mentor/availability/` | MentorAvailabilitySlotAPI | Login | none observed | — | TypeError: MentorAvailabilitySlotAPI.patch() missing 1 required positi (mentor) | — |
+| DELETE | `/api/v1/dashboard/mentor/availability/` | MentorAvailabilitySlotAPI | Login | none observed | — | TypeError: MentorAvailabilitySlotAPI.delete() missing 1 required posit (mentor) | — |
+| GET | `/api/v1/dashboard/mentor/availability/<str:slot_id>/` | MentorAvailabilitySlotAPI | Login | Mentor | — | — | — |
+| POST | `/api/v1/dashboard/mentor/availability/<str:slot_id>/` | MentorAvailabilitySlotAPI | Login | none observed | — | TypeError: MentorAvailabilitySlotAPI.post() got an unexpected keyword  (mentor) | — |
+| PATCH | `/api/v1/dashboard/mentor/availability/<str:slot_id>/` | MentorAvailabilitySlotAPI | Login | Mentor | — | — | — |
+| DELETE | `/api/v1/dashboard/mentor/availability/<str:slot_id>/` | MentorAvailabilitySlotAPI | Login | Mentor | features/mentor/api/mentor.api.ts:153 | — | — |
+| POST | `/api/v1/dashboard/mentor/session/participation/join/<str:session_id>/` | SessionJoinAPI | Login | any logged-in | features/mentor/mentees/api/mentees.api.ts:122, features/mentor/sessions/api/sessions.api.ts:313 | — | — |
+| GET | `/api/v1/dashboard/mentor/session/participant/history/` | UserSessionHistoryAPI | Login | any logged-in | features/mentor/mentees/api/mentees.api.ts:25, features/mentor/mentees/api/mentees.api.ts:78 (+1) | — | — |
+| POST | `/api/v1/dashboard/mentor/session/participant/add/<str:session_id>/` | MentorAddParticipantAPI | Login | Mentor | features/mentor/sessions/api/sessions.api.ts:371 | — | — |
+| GET | `/api/v1/dashboard/mentor/session/participant/list/<str:session_id>/` | MentorParticipantListAPI | Login | none observed | features/mentor/mentees/api/mentees.api.ts:91, features/mentor/sessions/api/sessions.api.ts:356 | — | — |
+| PATCH | `/api/v1/dashboard/mentor/session/participant/update/<str:link_id>/` | MentorParticipantUpdateAPI | Login | Mentor | features/mentor/mentees/api/mentees.api.ts:107, features/mentor/sessions/api/sessions.api.ts:384 | — | — |
+| PATCH | `/api/v1/dashboard/mentor/session/participant/feedback/<str:session_id>/` | ParticipantFeedbackAPI | Login | none observed | features/mentor/mentees/api/mentees.api.ts:66, features/mentor/sessions/api/sessions.api.ts:397 | — | — |
+| GET | `/api/v1/dashboard/mentor/tasks/ig-dropdown/` | MentorIGDropdownAPI | Login | Mentor | features/mentor/tasks/api/mentor-tasks.api.ts:42 | — | — |
+| GET | `/api/v1/dashboard/mentor/tasks/` | MentorTaskListCreateAPI | Login | Mentor | — | — | — |
+| POST | `/api/v1/dashboard/mentor/tasks/` | MentorTaskListCreateAPI | Login | Mentor | features/mentor/tasks/api/mentor-tasks.api.ts:96 | — | — |
+| GET | `/api/v1/dashboard/mentor/tasks/<str:task_id>/` | MentorTaskDetailAPI | Login | Mentor | features/mentor/tasks/api/mentor-tasks.api.ts:106 | — | — |
+| PUT | `/api/v1/dashboard/mentor/tasks/<str:task_id>/` | MentorTaskDetailAPI | Login | Mentor | features/mentor/tasks/api/mentor-tasks.api.ts:120 | — | — |
+| DELETE | `/api/v1/dashboard/mentor/tasks/<str:task_id>/` | MentorTaskDetailAPI | Login | Mentor | features/mentor/tasks/api/mentor-tasks.api.ts:130 | — | — |
+| POST | `/api/v1/dashboard/mentor/admin/assign/` | AdminAssignMentorAPI | Login | Admin | features/mentor/admin/api/mentor-assign.api.ts:21 | — | — |
+| DELETE | `/api/v1/dashboard/mentor/admin/assign/` | AdminAssignMentorAPI | Login | none observed | — | TypeError: AdminAssignMentorAPI.delete() missing 1 required positional (admin) | — |
+| POST | `/api/v1/dashboard/mentor/admin/assign/<str:user_muid>/` | AdminAssignMentorAPI | Login | none observed | — | TypeError: AdminAssignMentorAPI.post() got an unexpected keyword argum (admin) | — |
+| DELETE | `/api/v1/dashboard/mentor/admin/assign/<str:user_muid>/` | AdminAssignMentorAPI | Login | Admin | — | — | — |
+| POST | `/api/v1/dashboard/mentor/admin/deactivate/<str:user_mentor_id>/` | MentorDeactivationAPI | Login | Admin | features/mentor/admin/api/mentor-assign.api.ts:50 | — | — |
+| POST | `/api/v1/dashboard/mentor/admin/reactivate/<str:user_mentor_id>/` | MentorReactivationAPI | Login | Admin | features/mentor/admin/api/mentor-assign.api.ts:60 | — | — |
+| GET | `/api/v1/dashboard/mentor/<str:mentor_id>/preferred-igs/` | MentorPreferredIgAPI | Login | Mentor | — | — | — |
+| PATCH | `/api/v1/dashboard/mentor/<str:mentor_id>/preferred-igs/` | MentorPreferredIgAPI | Login | Mentor | — | — | — |
+| GET | `/api/v1/dashboard/mentor/<str:mentor_id>/grants/` | MentorScopeGrantListAPI | Login | Admin | features/mentor/admin/api/mentor-grants.api.ts:12 | — | — |
+| DELETE | `/api/v1/dashboard/mentor/<str:mentor_id>/grants/<str:grant_id>/` | MentorScopeGrantRevokeAPI | Login | Admin | features/mentor/admin/api/mentor-grants.api.ts:25 | — | — |
+| POST | `/api/v1/dashboard/mentor/change-company/` | MentorChangeCompanyAPI | Login | Mentor | features/mentor/api/mentor.api.ts:304 | — | — |
+| POST | `/api/v1/dashboard/mentor/session/student/request/` | StudentSessionRequestAPI | Login | any logged-in | features/mentor/sessions/api/student-requests.api.ts:52 | — | — |
+| GET | `/api/v1/dashboard/mentor/session/student/my-requests/` | StudentSessionRequestListAPI | Login | any logged-in | features/mentor/sessions/api/student-requests.api.ts:74 | — | — |
+| GET | `/api/v1/dashboard/mentor/session/student-requests/` | MentorStudentRequestListAPI | Login | Mentor | features/mentor/sessions/api/student-requests.api.ts:97 | — | H-06 |
+| PATCH | `/api/v1/dashboard/mentor/session/student-requests/<str:session_id>/verify/` | MentorStudentRequestVerifyAPI | Login | Mentor | features/mentor/sessions/api/student-requests.api.ts:113 | — | H-06 |
+| GET | `/api/v1/dashboard/mentor/persona/status/` | PersonaStatusAPI | Login | Mentor | features/mentor/api/mentor.api.ts:278 | — | — |
+| POST | `/api/v1/dashboard/mentor/persona/switch/` | PersonaSwitchAPI | Login | Mentor | features/mentor/api/mentor.api.ts:290 | — | — |
+
+#### `dashboard/organisation` (56 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| POST | `/api/v1/dashboard/organisation/institutes/create/` | InstitutionPostUpdateDeleteAPI | Login | Admin | features/organizations/api/organizations.api.ts:56 | — | — |
+| PUT | `/api/v1/dashboard/organisation/institutes/create/` | InstitutionPostUpdateDeleteAPI | Login | none observed | — | TypeError: InstitutionPostUpdateDeleteAPI.put() missing 1 required pos (admin) | — |
+| DELETE | `/api/v1/dashboard/organisation/institutes/create/` | InstitutionPostUpdateDeleteAPI | Login | none observed | — | TypeError: InstitutionPostUpdateDeleteAPI.delete() missing 1 required  (admin) | — |
+| POST | `/api/v1/dashboard/organisation/institutes/edit/<str:org_code>/` | InstitutionPostUpdateDeleteAPI | Login | none observed | — | TypeError: InstitutionPostUpdateDeleteAPI.post() got an unexpected key (admin) | — |
+| PUT | `/api/v1/dashboard/organisation/institutes/edit/<str:org_code>/` | InstitutionPostUpdateDeleteAPI | Login | Admin | features/organizations/api/organizations.api.ts:75 | — | — |
+| DELETE | `/api/v1/dashboard/organisation/institutes/edit/<str:org_code>/` | InstitutionPostUpdateDeleteAPI | Login | Admin | — | — | — |
+| POST | `/api/v1/dashboard/organisation/institutes/delete/<str:org_code>/` | InstitutionPostUpdateDeleteAPI | Login | none observed | — | TypeError: InstitutionPostUpdateDeleteAPI.post() got an unexpected key (admin) | L-38 |
+| PUT | `/api/v1/dashboard/organisation/institutes/delete/<str:org_code>/` | InstitutionPostUpdateDeleteAPI | Login | Admin | — | — | L-38 |
+| DELETE | `/api/v1/dashboard/organisation/institutes/delete/<str:org_code>/` | InstitutionPostUpdateDeleteAPI | Login | Admin | features/organizations/api/organizations.api.ts:85 | — | L-38 |
+| GET | `/api/v1/dashboard/organisation/institutes/<str:org_type>/csv/` | InstitutionCSVAPI | Login | Admin | features/organizations/api/organizations.api.ts:95 | — | — |
+| GET | `/api/v1/dashboard/organisation/institutes/info/<str:org_code>/` | InstitutionDetailsAPI | Login (anon→500) | Admin | — | IndexError: list index out of range (anon) | L-10 |
+| GET | `/api/v1/dashboard/organisation/institutes/prefill/<str:org_code>/` | InstitutionPrefillAPI | Login (anon→500) | Admin | — | IndexError: list index out of range (anon) | L-14, L-10 |
+| GET | `/api/v1/dashboard/organisation/institutes/<str:org_type>/` | InstitutionAPI | **Public** | any logged-in | features/events/api/events.api.ts:622, features/manage-users/api/manageUsers.api.ts:270 (+5) | — | — |
+| GET | `/api/v1/dashboard/organisation/institutes/<str:org_type>/<str:district_id>/` | InstitutionAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/dashboard/organisation/institutes/org/affiliation/show/` | AffiliationGetPostUpdateDeleteAPI | Login | Admin | — | — | — |
+| POST | `/api/v1/dashboard/organisation/institutes/org/affiliation/show/` | AffiliationGetPostUpdateDeleteAPI | Login | Admin | — | — | — |
+| PUT | `/api/v1/dashboard/organisation/institutes/org/affiliation/show/` | AffiliationGetPostUpdateDeleteAPI | Login | none observed | — | TypeError: AffiliationGetPostUpdateDeleteAPI.put() missing 1 required  (admin) | — |
+| DELETE | `/api/v1/dashboard/organisation/institutes/org/affiliation/show/` | AffiliationGetPostUpdateDeleteAPI | Login | none observed | — | TypeError: AffiliationGetPostUpdateDeleteAPI.delete() missing 1 requir (admin) | — |
+| GET | `/api/v1/dashboard/organisation/institutes/org/affiliation/create/` | AffiliationGetPostUpdateDeleteAPI | Login | Admin | — | — | — |
+| POST | `/api/v1/dashboard/organisation/institutes/org/affiliation/create/` | AffiliationGetPostUpdateDeleteAPI | Login | Admin | — | — | — |
+| PUT | `/api/v1/dashboard/organisation/institutes/org/affiliation/create/` | AffiliationGetPostUpdateDeleteAPI | Login | none observed | — | TypeError: AffiliationGetPostUpdateDeleteAPI.put() missing 1 required  (admin) | — |
+| DELETE | `/api/v1/dashboard/organisation/institutes/org/affiliation/create/` | AffiliationGetPostUpdateDeleteAPI | Login | none observed | — | TypeError: AffiliationGetPostUpdateDeleteAPI.delete() missing 1 requir (admin) | — |
+| GET | `/api/v1/dashboard/organisation/institutes/org/affiliation/edit/<str:affiliation_id>/` | AffiliationGetPostUpdateDeleteAPI | Login | none observed | — | TypeError: AffiliationGetPostUpdateDeleteAPI.get() got an unexpected k (admin) | — |
+| POST | `/api/v1/dashboard/organisation/institutes/org/affiliation/edit/<str:affiliation_id>/` | AffiliationGetPostUpdateDeleteAPI | Login | none observed | — | TypeError: AffiliationGetPostUpdateDeleteAPI.post() got an unexpected  (admin) | — |
+| PUT | `/api/v1/dashboard/organisation/institutes/org/affiliation/edit/<str:affiliation_id>/` | AffiliationGetPostUpdateDeleteAPI | Login | Admin | — | — | — |
+| DELETE | `/api/v1/dashboard/organisation/institutes/org/affiliation/edit/<str:affiliation_id>/` | AffiliationGetPostUpdateDeleteAPI | Login | Admin | — | — | — |
+| GET | `/api/v1/dashboard/organisation/institutes/org/affiliation/delete/<str:affiliation_id>/` | AffiliationGetPostUpdateDeleteAPI | Login | none observed | — | TypeError: AffiliationGetPostUpdateDeleteAPI.get() got an unexpected k (admin) | — |
+| POST | `/api/v1/dashboard/organisation/institutes/org/affiliation/delete/<str:affiliation_id>/` | AffiliationGetPostUpdateDeleteAPI | Login | none observed | — | TypeError: AffiliationGetPostUpdateDeleteAPI.post() got an unexpected  (admin) | — |
+| PUT | `/api/v1/dashboard/organisation/institutes/org/affiliation/delete/<str:affiliation_id>/` | AffiliationGetPostUpdateDeleteAPI | Login | Admin | — | — | — |
+| DELETE | `/api/v1/dashboard/organisation/institutes/org/affiliation/delete/<str:affiliation_id>/` | AffiliationGetPostUpdateDeleteAPI | Login | Admin | — | — | — |
+| GET | `/api/v1/dashboard/organisation/departments/` | DepartmentAPI | Login | Admin | features/organizations/api/departments.api.ts:39 | — | — |
+| POST | `/api/v1/dashboard/organisation/departments/` | DepartmentAPI | Login | Admin | — | — | — |
+| PUT | `/api/v1/dashboard/organisation/departments/` | DepartmentAPI | Login | none observed | — | TypeError: DepartmentAPI.put() missing 1 required positional argument: (admin) | — |
+| DELETE | `/api/v1/dashboard/organisation/departments/` | DepartmentAPI | Login | none observed | — | TypeError: DepartmentAPI.delete() missing 1 required positional argume (admin) | — |
+| GET | `/api/v1/dashboard/organisation/departments/create/` | DepartmentAPI | Login | Admin | — | — | — |
+| POST | `/api/v1/dashboard/organisation/departments/create/` | DepartmentAPI | Login | Admin | features/organizations/api/departments.api.ts:56 | — | — |
+| PUT | `/api/v1/dashboard/organisation/departments/create/` | DepartmentAPI | Login | none observed | — | TypeError: DepartmentAPI.put() missing 1 required positional argument: (admin) | — |
+| DELETE | `/api/v1/dashboard/organisation/departments/create/` | DepartmentAPI | Login | none observed | — | TypeError: DepartmentAPI.delete() missing 1 required positional argume (admin) | — |
+| GET | `/api/v1/dashboard/organisation/departments/edit/<str:department_id>/` | DepartmentAPI | Login | none observed | — | TypeError: DepartmentAPI.get() got an unexpected keyword argument 'dep (admin) | — |
+| POST | `/api/v1/dashboard/organisation/departments/edit/<str:department_id>/` | DepartmentAPI | Login | none observed | — | TypeError: DepartmentAPI.post() got an unexpected keyword argument 'de (admin) | — |
+| PUT | `/api/v1/dashboard/organisation/departments/edit/<str:department_id>/` | DepartmentAPI | Login | Admin | features/organizations/api/departments.api.ts:67 | — | — |
+| DELETE | `/api/v1/dashboard/organisation/departments/edit/<str:department_id>/` | DepartmentAPI | Login | Admin | — | — | — |
+| GET | `/api/v1/dashboard/organisation/departments/delete/<str:department_id>/` | DepartmentAPI | Login | none observed | — | TypeError: DepartmentAPI.get() got an unexpected keyword argument 'dep (admin) | — |
+| POST | `/api/v1/dashboard/organisation/departments/delete/<str:department_id>/` | DepartmentAPI | Login | none observed | — | TypeError: DepartmentAPI.post() got an unexpected keyword argument 'de (admin) | — |
+| PUT | `/api/v1/dashboard/organisation/departments/delete/<str:department_id>/` | DepartmentAPI | Login | Admin | — | — | — |
+| DELETE | `/api/v1/dashboard/organisation/departments/delete/<str:department_id>/` | DepartmentAPI | Login | Admin | features/organizations/api/departments.api.ts:75 | — | — |
+| GET | `/api/v1/dashboard/organisation/affiliation/list/` | AffiliationListAPI | Login (anon→500) | Admin | features/organizations/api/organizations.api.ts:116 | IndexError: list index out of range (anon) | L-10 |
+| GET | `/api/v1/dashboard/organisation/merge_organizations/<str:organisation_id>/` | OrganizationMergerView | Login | Admin | features/organizations/api/transfer.api.ts:25 | — | H-03, M-06 |
+| PATCH | `/api/v1/dashboard/organisation/merge_organizations/<str:organisation_id>/` | OrganizationMergerView | Login | Admin | features/organizations/api/transfer.api.ts:38 | — | H-03, M-06 |
+| POST | `/api/v1/dashboard/organisation/karma-type/create/` | OrganizationKarmaTypeGetPostPatchDeleteAPI | Login (anon→500) | any logged-in | — | IndexError: list index out of range (anon) | L-37 |
+| POST | `/api/v1/dashboard/organisation/karma-log/create/` | OrganizationKarmaLogGetPostPatchDeleteAPI | Login (anon→500) | any logged-in | — | IndexError: list index out of range (anon) | L-37 |
+| GET | `/api/v1/dashboard/organisation/base-template/` | OrganisationBaseTemplateAPI | Login | ? (500) | — | FileNotFoundError: [Errno 2] No such file or directory: './excel-templ (admin,associate,campusiglead,campuslead,) | — |
+| POST | `/api/v1/dashboard/organisation/import/` | OrganisationImportAPI | Login | Admin | — | — | L-38 |
+| POST | `/api/v1/dashboard/organisation/transfer/` | TransferAPI | **Public** | any logged-in | features/organizations/api/transfer.api.ts:14 | — | C-01 |
+| GET | `/api/v1/dashboard/organisation/verify/list/` | UnverifiedOrganizationsListAPI | Login | any logged-in | features/organizations/api/verification.api.ts:28 | — | H-01, H-02, M-05 |
+| POST | `/api/v1/dashboard/organisation/verify/<str:uorg_id>/` | VerifyOrganizationAPI | Login | any logged-in | features/organizations/api/verification.api.ts:39 | — | H-01, H-02, M-05 |
+
+#### `dashboard/profile` (32 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/profile/` | UserProfileEditView | Login | any logged-in | features/profile/api/profile.api.ts:69 | — | — |
+| PATCH | `/api/v1/dashboard/profile/` | UserProfileEditView | Login | any logged-in | features/profile/api/profile.api.ts:195 | — | M-31 |
+| DELETE | `/api/v1/dashboard/profile/` | UserProfileEditView | Login | any logged-in | — | — | M-32 |
+| GET | `/api/v1/dashboard/profile/badges/<str:muid>` | BadgesAPI | **Public** | any logged-in | features/profile/api/badges.api.ts:15 | — | L-23 |
+| GET | `/api/v1/dashboard/profile/user-profile/` | UserProfileAPI | Login | any logged-in | features/profile/api/profile.api.ts:60 | — | L-23 |
+| GET | `/api/v1/dashboard/profile/ig-edit/` | UserIgEditView | Login | any logged-in | — | — | L-28 |
+| PATCH | `/api/v1/dashboard/profile/ig-edit/` | UserIgEditView | Login | any logged-in | features/profile/api/profile.api.ts:441 | — | L-28 |
+| GET | `/api/v1/dashboard/profile/user-profile/<str:muid>/` | UserProfileAPI | **Public** | any logged-in | features/auth/api/auth.api.ts:141, features/campus-manage/api/campus-manage.api.ts:542 (+1) | — | L-23 |
+| GET | `/api/v1/dashboard/profile/user-log/` | UserLogAPI | Login | any logged-in | features/profile/api/profile.api.ts:91 | — | L-23 |
+| GET | `/api/v1/dashboard/profile/user-log/<str:muid>/` | UserLogAPI | **Public** | any logged-in | features/profile/api/profile.api.ts:100 | — | L-23 |
+| GET | `/api/v1/dashboard/profile/share-user-profile/` | ShareUserProfileAPI | Login | ? (500) | — | AssertionError: Expected a `Response`, `HttpResponse` or `HttpStreamin (admin,associate,campusiglead,campuslead,) | L-25 |
+| PUT | `/api/v1/dashboard/profile/share-user-profile/` | ShareUserProfileAPI | Login | any logged-in | features/profile/api/profile.api.ts:166 | — | — |
+| GET | `/api/v1/dashboard/profile/share-user-profile/<str:uuid>/` | ShareUserProfileAPI | Login | any logged-in | — | — | L-25 |
+| PUT | `/api/v1/dashboard/profile/share-user-profile/<str:uuid>/` | ShareUserProfileAPI | Login | ? (500) | — | TypeError: ShareUserProfileAPI.put() got an unexpected keyword argumen (admin,associate,campusiglead,campuslead,) | — |
+| GET | `/api/v1/dashboard/profile/rank/<str:muid>/` | UserRankAPI | **Public** | any logged-in | — | — | L-23, L-24 |
+| GET | `/api/v1/dashboard/profile/get-user-levels/` | UserLevelsAPI | Login | any logged-in | features/profile/api/profile.api.ts:113 | — | L-23 |
+| GET | `/api/v1/dashboard/profile/get-user-levels/<str:muid>/` | UserLevelsAPI | **Public** | any logged-in | features/mujourney/api/mujourney.api.ts:49, features/profile/api/profile.api.ts:124 | — | L-23 |
+| PUT | `/api/v1/dashboard/profile/socials/edit/` | SocialsAPI | Login | any logged-in | features/profile/api/profile.api.ts:155 | — | M-30 |
+| GET | `/api/v1/dashboard/profile/socials/` | GetSocialsAPI | Login | any logged-in | features/profile/api/profile.api.ts:137 | — | L-23 |
+| GET | `/api/v1/dashboard/profile/socials/<str:muid>/` | GetSocialsAPI | **Public** | any logged-in | features/profile/api/profile.api.ts:146 | — | L-23 |
+| GET | `/api/v1/dashboard/profile/qrcode-get/<str:uuid>/` | QrcodeRetrieveAPI | **Public** | any logged-in | — | — | L-23 |
+| POST | `/api/v1/dashboard/profile/change-password/` | ResetPasswordAPI | Login | any logged-in | — | — | L-26 |
+| GET | `/api/v1/dashboard/profile/userterm-approved/<str:muid>/` | UsertermAPI | **Public** | any logged-in | — | — | L-02 |
+| POST | `/api/v1/dashboard/profile/userterm-approved/<str:muid>/` | UsertermAPI | **Public** | any logged-in | — | — | L-02 |
+| GET | `/api/v1/dashboard/profile/karma-feed/` | KarmaFeedAPI | **Public** | any logged-in | features/home/api/home.api.ts:36 | — | L-27 |
+| GET | `/api/v1/dashboard/profile/user-level-feed/` | UserLevelFeedAPI | Login | any logged-in | features/mujourney/api/mujourney.api.ts:63 | — | M-29 |
+| GET | `/api/v1/dashboard/profile/cover-pic/` | UserProfileCoverView | Login | any logged-in | features/profile/api/profile.api.ts:246 | — | — |
+| POST | `/api/v1/dashboard/profile/cover-pic/` | UserProfileCoverView | Login | any logged-in | — | — | — |
+| DELETE | `/api/v1/dashboard/profile/cover-pic/` | UserProfileCoverView | Login | any logged-in | features/profile/api/profile.api.ts:297 | — | — |
+| GET | `/api/v1/dashboard/profile/user-preferences/` | UserPreferencesAPI | Login | any logged-in | — | — | — |
+| PATCH | `/api/v1/dashboard/profile/user-preferences/` | UserPreferencesAPI | Login | ? (500) | — | AttributeError: module 'api.dashboard.profile.profile_serializer' has  (admin,associate,campusiglead,campuslead,) | M-48 |
+| GET | `/api/v1/dashboard/profile/permute/<str:muid>/` | UserPermuteAPI | **Public** | any logged-in | — | — | L-23 |
+
+#### `dashboard/projects` (22 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/projects/` | ProjectsAPIView | Login | any logged-in | features/projects/api/projects.api.ts:35, features/projects/api/projects.api.ts:57 | — | — |
+| POST | `/api/v1/dashboard/projects/` | ProjectsAPIView | Login | any logged-in | — | — | L-40 |
+| GET | `/api/v1/dashboard/projects/<uuid:pk>/` | ProjectDetailAPIView | Login | ? (500) | features/projects/api/projects.api.ts:74 | DoesNotExist: Project matching query does not exist. (admin,associate,campusiglead,campuslead,) | L-12 |
+| PUT | `/api/v1/dashboard/projects/<uuid:pk>/` | ProjectDetailAPIView | Login | ? (500) | — | DoesNotExist: Project matching query does not exist. (admin,associate,campusiglead,campuslead,) | L-12 |
+| DELETE | `/api/v1/dashboard/projects/<uuid:pk>/` | ProjectDetailAPIView | Login | any logged-in | features/projects/api/projects.api.ts:149 | — | L-12 |
+| PATCH | `/api/v1/dashboard/projects/<uuid:pk>/status/` | ProjectStatusAPI | Login | any logged-in | features/projects/api/projects.api.ts:160 | — | — |
+| GET | `/api/v1/dashboard/projects/<uuid:project_id>/members/` | ProjectMemberAPI | Login | any logged-in | features/projects/api/projects.api.ts:169 | — | — |
+| POST | `/api/v1/dashboard/projects/<uuid:project_id>/members/` | ProjectMemberAPI | Login | none observed | features/projects/api/projects.api.ts:180 | — | — |
+| DELETE | `/api/v1/dashboard/projects/<uuid:project_id>/members/` | ProjectMemberAPI | Login | ? (500) | — | TypeError: ProjectMemberAPI.delete() missing 1 required positional arg (admin,associate,campusiglead,campuslead,) | — |
+| GET | `/api/v1/dashboard/projects/<uuid:project_id>/members/<uuid:pk>/` | ProjectMemberAPI | Login | ? (500) | — | TypeError: ProjectMemberAPI.get() got an unexpected keyword argument ' (admin,associate,campusiglead,campuslead,) | — |
+| POST | `/api/v1/dashboard/projects/<uuid:project_id>/members/<uuid:pk>/` | ProjectMemberAPI | Login | ? (500) | — | TypeError: ProjectMemberAPI.post() got an unexpected keyword argument  (admin,associate,campusiglead,campuslead,) | — |
+| DELETE | `/api/v1/dashboard/projects/<uuid:project_id>/members/<uuid:pk>/` | ProjectMemberAPI | Login | none observed | features/projects/api/projects.api.ts:192 | — | — |
+| POST | `/api/v1/dashboard/projects/vote/` | ProjectVoteAPI | Login | any logged-in | features/projects/api/projects.api.ts:203 | — | — |
+| DELETE | `/api/v1/dashboard/projects/vote/` | ProjectVoteAPI | Login | ? (500) | — | TypeError: ProjectVoteAPI.delete() missing 1 required positional argum (admin,associate,campusiglead,campuslead,) | — |
+| POST | `/api/v1/dashboard/projects/vote/<uuid:pk>/` | ProjectVoteAPI | Login | ? (500) | — | TypeError: ProjectVoteAPI.post() got an unexpected keyword argument 'p (admin,associate,campusiglead,campuslead,) | — |
+| DELETE | `/api/v1/dashboard/projects/vote/<uuid:pk>/` | ProjectVoteAPI | Login | any logged-in | features/projects/api/projects.api.ts:212 | — | — |
+| POST | `/api/v1/dashboard/projects/comment/` | ProjectCommentAPI | Login | any logged-in | features/projects/api/projects.api.ts:220 | — | — |
+| PUT | `/api/v1/dashboard/projects/comment/` | ProjectCommentAPI | Login | ? (500) | — | TypeError: ProjectCommentAPI.put() missing 1 required positional argum (admin,associate,campusiglead,campuslead,) | — |
+| DELETE | `/api/v1/dashboard/projects/comment/` | ProjectCommentAPI | Login | ? (500) | — | TypeError: ProjectCommentAPI.delete() missing 1 required positional ar (admin,associate,campusiglead,campuslead,) | — |
+| POST | `/api/v1/dashboard/projects/comment/<uuid:pk>/` | ProjectCommentAPI | Login | ? (500) | — | TypeError: ProjectCommentAPI.post() got an unexpected keyword argument (admin,associate,campusiglead,campuslead,) | — |
+| PUT | `/api/v1/dashboard/projects/comment/<uuid:pk>/` | ProjectCommentAPI | Login | any logged-in | — | — | — |
+| DELETE | `/api/v1/dashboard/projects/comment/<uuid:pk>/` | ProjectCommentAPI | Login | any logged-in | features/projects/api/projects.api.ts:229 | — | — |
+
+#### `dashboard/referral` (2 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/referral/` | ReferralListAPI | Login | any logged-in | — | — | — |
+| POST | `/api/v1/dashboard/referral/send-referral/` | Referral | Login | any logged-in | — | — | M-45 |
+
+#### `dashboard/roles` (30 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/roles/user-role/<str:role_id>/` | UserRoleSearchAPI | Login | Admin | — | — | M-02, M-03 |
+| GET | `/api/v1/dashboard/roles/base-template/` | RoleBaseTemplateAPI | Login | ? (500) | features/manage-roles/api/manage-roles.api.ts:222 | FileNotFoundError: [Errno 2] No such file or directory: './excel-templ (admin,associate,campusiglead,campuslead,) | L-29 |
+| GET | `/api/v1/dashboard/roles/bulk-assign/` | UserRoleLinkManagement | Login | none observed | — | TypeError: UserRoleLinkManagement.get() missing 1 required positional  (admin) | — |
+| POST | `/api/v1/dashboard/roles/bulk-assign/` | UserRoleLinkManagement | Login | none observed | — | TypeError: UserRoleLinkManagement.post() missing 1 required positional (admin) | — |
+| PUT | `/api/v1/dashboard/roles/bulk-assign/` | UserRoleLinkManagement | Login | none observed | — | TypeError: UserRoleLinkManagement.put() missing 1 required positional  (admin) | — |
+| PATCH | `/api/v1/dashboard/roles/bulk-assign/` | UserRoleLinkManagement | Login | none observed | — | TypeError: UserRoleLinkManagement.patch() missing 1 required positiona (admin) | — |
+| GET | `/api/v1/dashboard/roles/bulk-assign/<str:role_id>/` | UserRoleLinkManagement | Login | Admin | features/manage-roles/api/manage-roles.api.ts:167 | — | — |
+| POST | `/api/v1/dashboard/roles/bulk-assign/<str:role_id>/` | UserRoleLinkManagement | Login | Admin | features/manage-roles/api/manage-roles.api.ts:201 | — | — |
+| PUT | `/api/v1/dashboard/roles/bulk-assign/<str:role_id>/` | UserRoleLinkManagement | Login | Admin | features/manage-roles/api/manage-roles.api.ts:181 | — | — |
+| PATCH | `/api/v1/dashboard/roles/bulk-assign/<str:role_id>/` | UserRoleLinkManagement | Login | none observed | features/manage-roles/api/manage-roles.api.ts:212 | TypeError: 'NoneType' object is not iterable (admin) | M-02, L-29 |
+| POST | `/api/v1/dashboard/roles/bulk-assign-excel/` | UserRoleBulkAssignAPI | Login | Admin | features/manage-roles/api/manage-roles.api.ts:243 | — | M-36 |
+| POST | `/api/v1/dashboard/roles/user-role/` | UserRole | Login | Admin | features/manage-roles/api/manage-roles.api.ts:122, features/manage-users/api/manageUsers.api.ts:132 (+1) | — | M-02, M-03 |
+| DELETE | `/api/v1/dashboard/roles/user-role/` | UserRole | Login | Admin | features/manage-roles/api/manage-roles.api.ts:137 | — | M-02, M-03 |
+| GET | `/api/v1/dashboard/roles/` | RoleAPI | Login | Admin | features/manage-roles/api/manage-roles.api.ts:35 | — | M-04 |
+| POST | `/api/v1/dashboard/roles/` | RoleAPI | Login | Admin | features/manage-roles/api/manage-roles.api.ts:43 | — | — |
+| PATCH | `/api/v1/dashboard/roles/` | RoleAPI | Login | none observed | — | TypeError: RoleAPI.patch() missing 1 required positional argument: 'ro (admin) | — |
+| DELETE | `/api/v1/dashboard/roles/` | RoleAPI | Login | none observed | — | TypeError: RoleAPI.delete() missing 1 required positional argument: 'r (admin) | — |
+| GET | `/api/v1/dashboard/roles/` | RoleAPI | Login | Admin | features/manage-roles/api/manage-roles.api.ts:35 | — | M-04 |
+| POST | `/api/v1/dashboard/roles/` | RoleAPI | Login | Admin | features/manage-roles/api/manage-roles.api.ts:43 | — | — |
+| PATCH | `/api/v1/dashboard/roles/` | RoleAPI | Login | none observed | — | TypeError: RoleAPI.patch() missing 1 required positional argument: 'ro (admin) | — |
+| DELETE | `/api/v1/dashboard/roles/` | RoleAPI | Login | none observed | — | TypeError: RoleAPI.delete() missing 1 required positional argument: 'r (admin) | — |
+| GET | `/api/v1/dashboard/roles/csv/` | RoleManagementCSV | Login | Admin | features/manage-roles/api/manage-roles.api.ts:71 | — | — |
+| GET | `/api/v1/dashboard/roles/<str:roles_id>/` | RoleAPI | Login | none observed | — | TypeError: RoleAPI.get() got an unexpected keyword argument 'roles_id' (admin) | M-01 |
+| POST | `/api/v1/dashboard/roles/<str:roles_id>/` | RoleAPI | Login | none observed | — | TypeError: RoleAPI.post() got an unexpected keyword argument 'roles_id (admin) | M-01 |
+| PATCH | `/api/v1/dashboard/roles/<str:roles_id>/` | RoleAPI | Login | Admin | features/manage-roles/api/manage-roles.api.ts:54 | — | M-01 |
+| DELETE | `/api/v1/dashboard/roles/<str:roles_id>/` | RoleAPI | Login | Admin | features/manage-roles/api/manage-roles.api.ts:62 | — | M-01 |
+| GET | `/api/v1/dashboard/roles/<str:roles_id>/` | RoleAPI | Login | none observed | — | TypeError: RoleAPI.get() got an unexpected keyword argument 'roles_id' (admin) | M-01 |
+| POST | `/api/v1/dashboard/roles/<str:roles_id>/` | RoleAPI | Login | none observed | — | TypeError: RoleAPI.post() got an unexpected keyword argument 'roles_id (admin) | M-01 |
+| PATCH | `/api/v1/dashboard/roles/<str:roles_id>/` | RoleAPI | Login | Admin | features/manage-roles/api/manage-roles.api.ts:54 | — | M-01 |
+| DELETE | `/api/v1/dashboard/roles/<str:roles_id>/` | RoleAPI | Login | Admin | features/manage-roles/api/manage-roles.api.ts:62 | — | M-01 |
+
+#### `dashboard/skill` (7 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/skill/` | SkillListAPI | Login | any logged-in | features/projects/components/project-skill-picker.tsx:44 | — | — |
+| POST | `/api/v1/dashboard/skill/create/` | SkillCreateAPI | Login | Admin | — | — | — |
+| GET | `/api/v1/dashboard/skill/dropdown/` | SkillDropdownAPI | Login | any logged-in | — | — | — |
+| GET | `/api/v1/dashboard/skill/<str:skill_id>/` | SkillDetailAPI | Login | any logged-in | — | — | — |
+| PUT | `/api/v1/dashboard/skill/<str:skill_id>/` | SkillDetailAPI | Login | Admin | — | — | — |
+| DELETE | `/api/v1/dashboard/skill/<str:skill_id>/` | SkillDetailAPI | Login | Admin | — | — | — |
+| GET | `/api/v1/dashboard/skill/<str:skill_id>/tasks/` | SkillTasksAPI | Login | any logged-in | — | — | — |
+
+#### `dashboard/task` (29 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/task/list-task-type/` | TaskTypeCrudAPI | Login | Admin, Company, Mentor | features/company-tasks/api/tasks.api.ts:207, features/mentor/tasks/api/mentor-tasks.api.ts:52 (+1) | — | — |
+| POST | `/api/v1/dashboard/task/list-task-type/` | TaskTypeCrudAPI | Login | Admin | features/company-tasks/api/tasks.api.ts:215, features/tasks/api/task-type.api.ts:58 | — | — |
+| PUT | `/api/v1/dashboard/task/list-task-type/` | TaskTypeCrudAPI | Login | none observed | features/company-tasks/api/tasks.api.ts:223 | TypeError: TaskTypeCrudAPI.put() missing 1 required positional argumen (admin) | — |
+| DELETE | `/api/v1/dashboard/task/list-task-type/` | TaskTypeCrudAPI | Login | none observed | features/company-tasks/api/tasks.api.ts:231 | TypeError: TaskTypeCrudAPI.delete() missing 1 required positional argu (admin) | — |
+| GET | `/api/v1/dashboard/task/task-type/<str:task_type_id>/` | TaskTypeCrudAPI | Login | none observed | — | TypeError: TaskTypeCrudAPI.get() got an unexpected keyword argument 't (admin,company,mentor) | — |
+| POST | `/api/v1/dashboard/task/task-type/<str:task_type_id>/` | TaskTypeCrudAPI | Login | none observed | — | TypeError: TaskTypeCrudAPI.post() got an unexpected keyword argument ' (admin) | — |
+| PUT | `/api/v1/dashboard/task/task-type/<str:task_type_id>/` | TaskTypeCrudAPI | Login | Admin | features/tasks/api/task-type.api.ts:69 | — | — |
+| DELETE | `/api/v1/dashboard/task/task-type/<str:task_type_id>/` | TaskTypeCrudAPI | Login | Admin | features/tasks/api/task-type.api.ts:77 | — | — |
+| GET | `/api/v1/dashboard/task/channel/` | ChannelDropdownAPI | Login | Admin, Associate, Company, Fellow, Mentor | — | — | — |
+| GET | `/api/v1/dashboard/task/ig/` | IGDropdownAPI | Login | Admin, Associate, Company, Fellow, Mentor | — | — | — |
+| GET | `/api/v1/dashboard/task/organization/` | OrganizationDropdownAPI | Login | Admin, Associate, Company, Fellow, Mentor | — | — | — |
+| GET | `/api/v1/dashboard/task/level/` | LevelDropdownAPI | Login | Admin, Associate, Company, Fellow, Mentor | features/company-jobs/api/eligibility-refs.api.ts:36, features/company-tasks/api/tasks.api.ts:241 (+1) | — | — |
+| GET | `/api/v1/dashboard/task/task-types/` | TaskTypesDropDownAPI | Login | Admin, Associate, Company, Fellow, Mentor | — | — | — |
+| GET | `/api/v1/dashboard/task/` | TaskListAPI | Login | Admin, Associate, Fellow | — | — | — |
+| POST | `/api/v1/dashboard/task/` | TaskListAPI | Login | Admin, Associate, Fellow | features/tasks/api/tasks.api.ts:134 | — | — |
+| GET | `/api/v1/dashboard/task/active/` | TaskActiveListAPI | Login | Admin, Associate, Fellow | — | — | — |
+| GET | `/api/v1/dashboard/task/inactive/` | TaskInactiveListAPI | Login | Admin, Associate, Fellow | — | — | — |
+| GET | `/api/v1/dashboard/task/list/` | TaskPublicListAPI | **Public** | any logged-in | features/company-tasks/api/tasks.api.ts:199, features/tasks/api/tasks.api.ts:102 | — | — |
+| GET | `/api/v1/dashboard/task/csv/` | TaskListCSV | Login | Admin, Associate, Fellow | — | — | — |
+| POST | `/api/v1/dashboard/task/import/` | ImportTaskListCSV | Login | Admin, Associate, Fellow | features/tasks/api/tasks.api.ts:169 | — | — |
+| GET | `/api/v1/dashboard/task/base-template/` | TaskBaseTemplateAPI | Login | none observed | — | FileNotFoundError: [Errno 2] No such file or directory: './excel-templ (admin,associate,fellow) | — |
+| GET | `/api/v1/dashboard/task/events/` | EventDropDownApi | Login | Admin | — | — | — |
+| GET | `/api/v1/dashboard/task/pending/` | AdminTaskApprovalAPI | Login | Admin | — | — | — |
+| PATCH | `/api/v1/dashboard/task/pending/` | AdminTaskApprovalAPI | Login | none observed | — | TypeError: AdminTaskApprovalAPI.patch() missing 1 required positional  (admin) | — |
+| GET | `/api/v1/dashboard/task/<str:task_id>/review/` | AdminTaskApprovalAPI | Login | none observed | — | TypeError: AdminTaskApprovalAPI.get() got an unexpected keyword argume (admin) | — |
+| PATCH | `/api/v1/dashboard/task/<str:task_id>/review/` | AdminTaskApprovalAPI | Login | Admin | features/tasks/api/task-verification.api.ts:59 | — | — |
+| GET | `/api/v1/dashboard/task/<str:task_id>/` | TaskAPI | Login | Admin, Associate, Fellow | features/tasks/api/tasks.api.ts:118 | — | — |
+| PUT | `/api/v1/dashboard/task/<str:task_id>/` | TaskAPI | Login | Admin, Associate, Fellow | features/tasks/api/tasks.api.ts:148 | — | — |
+| DELETE | `/api/v1/dashboard/task/<str:task_id>/` | TaskAPI | Login | Admin, Associate, Fellow | features/tasks/api/tasks.api.ts:159 | — | M-39 |
+
+#### `dashboard/user` (34 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/user/preferences/` | UserPreferencesAPI | Login | any logged-in | features/profile/api/profile.api.ts:171 | — | — |
+| PATCH | `/api/v1/dashboard/user/preferences/` | UserPreferencesAPI | Login | any logged-in | features/profile/api/profile.api.ts:182 | — | — |
+| GET | `/api/v1/dashboard/user/search/` | UserSearchAPI | **Public** | any logged-in | features/events/api/events.api.ts:613, features/projects/components/project-member-picker.tsx:40 (+2) | — | M-15 |
+| GET | `/api/v1/dashboard/user/verification/` | UserVerificationAPI | Login | Admin | features/role-verification/api/role-verification.api.ts:39 | — | H-07, L-12, L-22 |
+| PATCH | `/api/v1/dashboard/user/verification/` | UserVerificationAPI | Login | none observed | — | TypeError: UserVerificationAPI.patch() missing 1 required positional a (admin) | H-07, L-12, L-22 |
+| DELETE | `/api/v1/dashboard/user/verification/` | UserVerificationAPI | Login | none observed | — | TypeError: UserVerificationAPI.delete() missing 1 required positional  (admin) | H-07, L-12, L-22 |
+| GET | `/api/v1/dashboard/user/verification/csv/` | UserVerificationCSV | Login | Admin | — | — | H-07, L-12, L-22, M-35 |
+| GET | `/api/v1/dashboard/user/verification/<str:link_id>/` | UserVerificationAPI | Login | none observed | — | TypeError: UserVerificationAPI.get() got an unexpected keyword argumen (admin) | H-07, L-12, L-22 |
+| PATCH | `/api/v1/dashboard/user/verification/<str:link_id>/` | UserVerificationAPI | Login | none observed | features/role-verification/api/role-verification.api.ts:51 | DoesNotExist: UserRoleLink matching query does not exist. (admin) | H-07, L-12, L-22 |
+| DELETE | `/api/v1/dashboard/user/verification/<str:link_id>/` | UserVerificationAPI | Login | none observed | features/role-verification/api/role-verification.api.ts:59 | DoesNotExist: UserRoleLink matching query does not exist. (admin) | H-07, L-12, L-22 |
+| GET | `/api/v1/dashboard/user/verification/<str:link_id>/` | UserVerificationAPI | Login | none observed | — | TypeError: UserVerificationAPI.get() got an unexpected keyword argumen (admin) | H-07, L-12, L-22 |
+| PATCH | `/api/v1/dashboard/user/verification/<str:link_id>/` | UserVerificationAPI | Login | none observed | features/role-verification/api/role-verification.api.ts:51 | DoesNotExist: UserRoleLink matching query does not exist. (admin) | H-07, L-12, L-22 |
+| DELETE | `/api/v1/dashboard/user/verification/<str:link_id>/` | UserVerificationAPI | Login | none observed | features/role-verification/api/role-verification.api.ts:59 | DoesNotExist: UserRoleLink matching query does not exist. (admin) | H-07, L-12, L-22 |
+| GET | `/api/v1/dashboard/user/organization/` | UserAddOrgAPI | Login (anon→500) | any logged-in | — | IndexError: list index out of range (anon) | H-23, L-10 |
+| POST | `/api/v1/dashboard/user/organization/` | UserAddOrgAPI | Login (anon→500) | any logged-in | features/onboarding/api/onboarding.api.ts:93 | IndexError: list index out of range (anon) | H-23, L-10 |
+| GET | `/api/v1/dashboard/user/organization/list/` | UserAddOrgAPI | Login (anon→500) | any logged-in | — | IndexError: list index out of range (anon) | H-23, L-10 |
+| POST | `/api/v1/dashboard/user/organization/list/` | UserAddOrgAPI | Login (anon→500) | any logged-in | — | IndexError: list index out of range (anon) | H-23, L-10 |
+| GET | `/api/v1/dashboard/user/info/` | UserInfoAPI | Login | any logged-in | features/auth/api/auth.api.ts:128, features/events/components/manage-event-detail-view.tsx:172 (+1) | — | M-16 |
+| POST | `/api/v1/dashboard/user/forgot-password/` | ForgotPasswordAPI | **Public** | any logged-in | features/auth/api/auth.api.ts:85 | — | M-34, L-17 |
+| POST | `/api/v1/dashboard/user/reset-password/verify-token/<str:token>/` | ResetPasswordVerifyTokenAPI | **Public** | any logged-in | features/auth/api/auth.api.ts:98 | — | M-34, L-17 |
+| POST | `/api/v1/dashboard/user/reset-password/<str:token>/` | ResetPasswordConfirmAPI | **Public** | any logged-in | features/auth/api/auth.api.ts:113 | — | M-34, L-17 |
+| POST | `/api/v1/dashboard/user/profile/update/` | UserProfilePictureView | **Public** | any logged-in | — | — | C-03, L-10 |
+| PATCH | `/api/v1/dashboard/user/profile/update/` | UserProfilePictureView | Login (anon→500) | any logged-in | features/profile/api/profile.api.ts:230 | IndexError: list index out of range (anon) | L-10 |
+| GET | `/api/v1/dashboard/user/csv/` | UserManagementCSV | Login | Admin | — | — | M-35 |
+| GET | `/api/v1/dashboard/user/` | UserAPI | Login | Admin | features/manage-users/api/manageUsers.api.ts:64 | — | — |
+| GET | `/api/v1/dashboard/user/<str:user_id>/` | UserGetPatchDeleteAPI | Login | Admin | features/manage-users/api/manageUsers.api.ts:81 | — | — |
+| PATCH | `/api/v1/dashboard/user/<str:user_id>/` | UserGetPatchDeleteAPI | Login | Admin | features/manage-users/api/manageUsers.api.ts:99 | — | M-33 |
+| DELETE | `/api/v1/dashboard/user/<str:user_id>/` | UserGetPatchDeleteAPI | Login | Admin | features/manage-users/api/manageUsers.api.ts:107 | — | L-21 |
+| GET | `/api/v1/dashboard/user/<str:user_id>/` | UserGetPatchDeleteAPI | Login | Admin | features/manage-users/api/manageUsers.api.ts:81 | — | — |
+| PATCH | `/api/v1/dashboard/user/<str:user_id>/` | UserGetPatchDeleteAPI | Login | Admin | features/manage-users/api/manageUsers.api.ts:99 | — | M-33 |
+| DELETE | `/api/v1/dashboard/user/<str:user_id>/` | UserGetPatchDeleteAPI | Login | Admin | features/manage-users/api/manageUsers.api.ts:107 | — | L-21 |
+| GET | `/api/v1/dashboard/user/<str:user_id>/` | UserGetPatchDeleteAPI | Login | Admin | features/manage-users/api/manageUsers.api.ts:81 | — | — |
+| PATCH | `/api/v1/dashboard/user/<str:user_id>/` | UserGetPatchDeleteAPI | Login | Admin | features/manage-users/api/manageUsers.api.ts:99 | — | M-33 |
+| DELETE | `/api/v1/dashboard/user/<str:user_id>/` | UserGetPatchDeleteAPI | Login | Admin | features/manage-users/api/manageUsers.api.ts:107 | — | L-21 |
+
+#### `dashboard/zonal` (7 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/dashboard/zonal/zonal-details/` | ZonalDetailsAPI | Login | Zonal Lead | features/zonal/api/zonal.api.ts:25 | — | M-24 |
+| GET | `/api/v1/dashboard/zonal/top-districts/` | ZonalTopThreeDistrictAPI | Login | Zonal Lead | features/zonal/api/zonal.api.ts:30 | — | M-24 |
+| GET | `/api/v1/dashboard/zonal/student-level/` | ZonalStudentLevelStatusAPI | Login | Zonal Lead | features/zonal/api/zonal.api.ts:35 | — | M-24 |
+| GET | `/api/v1/dashboard/zonal/student-details/` | ZonalStudentDetailsAPI | Login | Zonal Lead | — | — | M-24 |
+| GET | `/api/v1/dashboard/zonal/student-details/csv/` | ZonalStudentDetailsCSVAPI | Login | Zonal Lead | features/zonal/api/zonal.api.ts:49 | — | M-24 |
+| GET | `/api/v1/dashboard/zonal/college-details/` | ZonalCollegeDetailsAPI | Login | Zonal Lead | — | — | M-24 |
+| GET | `/api/v1/dashboard/zonal/college-details/csv/` | ZonalCollegeDetailsCSVAPI | Login | Zonal Lead | features/zonal/api/zonal.api.ts:67 | — | M-24 |
+
+#### `donate` (5 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| POST | `/api/v1/donate/order/` | RazorPayOrderAPI | **Public** | any logged-in | — | — | L-35 |
+| POST | `/api/v1/donate/verify/` | RazorPayVerification | **Public** | any logged-in | — | — | H-29, M-44, L-35 |
+| POST | `/api/v1/donate/subscription/create/` | RazorPaySubscriptionAPI | **Public** | any logged-in | — | — | L-35 |
+| POST | `/api/v1/donate/subscription/verify/` | RazorPaySubscriptionVerification | **Public** | any logged-in | — | — | H-29, M-44, L-35 |
+| POST | `/api/v1/donate/bank-transfer/` | BankTransferAPI | **Public** | any logged-in | — | — | L-35 |
+
+#### `hackathon` (42 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/hackathon/list-hackathons/` | HackathonManagementAPI | Login | Admin | — | — | M-53 |
+| POST | `/api/v1/hackathon/list-hackathons/` | HackathonManagementAPI | Login | Admin | — | — | M-53 |
+| PUT | `/api/v1/hackathon/list-hackathons/` | HackathonManagementAPI | Login | none observed | — | TypeError: HackathonManagementAPI.put() missing 1 required positional  (admin) | M-53 |
+| DELETE | `/api/v1/hackathon/list-hackathons/` | HackathonManagementAPI | Login | none observed | — | TypeError: HackathonManagementAPI.delete() missing 1 required position (admin) | M-53 |
+| GET | `/api/v1/hackathon/list-hackathons/upcoming/` | HackathonManagementAPI | Login | Admin | — | — | M-53 |
+| POST | `/api/v1/hackathon/list-hackathons/upcoming/` | HackathonManagementAPI | Login | Admin | — | — | M-53 |
+| PUT | `/api/v1/hackathon/list-hackathons/upcoming/` | HackathonManagementAPI | Login | none observed | — | TypeError: HackathonManagementAPI.put() missing 1 required positional  (admin) | M-53 |
+| DELETE | `/api/v1/hackathon/list-hackathons/upcoming/` | HackathonManagementAPI | Login | none observed | — | TypeError: HackathonManagementAPI.delete() missing 1 required position (admin) | M-53 |
+| GET | `/api/v1/hackathon/list-hackathons/<str:hackathon_id>/` | HackathonManagementAPI | Login | Admin | — | — | M-53 |
+| POST | `/api/v1/hackathon/list-hackathons/<str:hackathon_id>/` | HackathonManagementAPI | Login | none observed | — | TypeError: HackathonManagementAPI.post() got an unexpected keyword arg (admin) | M-53 |
+| PUT | `/api/v1/hackathon/list-hackathons/<str:hackathon_id>/` | HackathonManagementAPI | Login | Admin | — | — | M-53 |
+| DELETE | `/api/v1/hackathon/list-hackathons/<str:hackathon_id>/` | HackathonManagementAPI | Login | Admin | — | — | M-53 |
+| GET | `/api/v1/hackathon/info/<str:hackathon_id>/` | HackathonInfoAPI | Login | Admin | — | — | M-53 |
+| GET | `/api/v1/hackathon/create-hackathon/` | HackathonManagementAPI | Login | Admin | — | — | M-53 |
+| POST | `/api/v1/hackathon/create-hackathon/` | HackathonManagementAPI | Login | Admin | — | — | M-53 |
+| PUT | `/api/v1/hackathon/create-hackathon/` | HackathonManagementAPI | Login | none observed | — | TypeError: HackathonManagementAPI.put() missing 1 required positional  (admin) | M-53 |
+| DELETE | `/api/v1/hackathon/create-hackathon/` | HackathonManagementAPI | Login | none observed | — | TypeError: HackathonManagementAPI.delete() missing 1 required position (admin) | M-53 |
+| GET | `/api/v1/hackathon/edit-hackathon/<str:hackathon_id>/` | HackathonManagementAPI | Login | Admin | — | — | M-53 |
+| POST | `/api/v1/hackathon/edit-hackathon/<str:hackathon_id>/` | HackathonManagementAPI | Login | none observed | — | TypeError: HackathonManagementAPI.post() got an unexpected keyword arg (admin) | M-53 |
+| PUT | `/api/v1/hackathon/edit-hackathon/<str:hackathon_id>/` | HackathonManagementAPI | Login | Admin | — | — | M-53 |
+| DELETE | `/api/v1/hackathon/edit-hackathon/<str:hackathon_id>/` | HackathonManagementAPI | Login | Admin | — | — | M-53 |
+| GET | `/api/v1/hackathon/delete-hackathon/<str:hackathon_id>/` | HackathonManagementAPI | Login | Admin | — | — | M-53 |
+| POST | `/api/v1/hackathon/delete-hackathon/<str:hackathon_id>/` | HackathonManagementAPI | Login | none observed | — | TypeError: HackathonManagementAPI.post() got an unexpected keyword arg (admin) | M-53 |
+| PUT | `/api/v1/hackathon/delete-hackathon/<str:hackathon_id>/` | HackathonManagementAPI | Login | Admin | — | — | M-53 |
+| DELETE | `/api/v1/hackathon/delete-hackathon/<str:hackathon_id>/` | HackathonManagementAPI | Login | Admin | — | — | M-53 |
+| PUT | `/api/v1/hackathon/publish-hackathon/<str:hackathon_id>/` | HackathonPublishingAPI | Login | Admin | — | — | M-53 |
+| POST | `/api/v1/hackathon/submit-hackathon/` | HackathonSubmissionAPI | Login | none observed | — | IntegrityError: NOT NULL constraint failed: hackathon_submission.hacka (admin) | M-53 |
+| GET | `/api/v1/hackathon/list-organiser-hackathons/<str:hackathon_id>/` | HackathonOrganiserAPI | Login | Admin | — | — | M-53 |
+| POST | `/api/v1/hackathon/list-organiser-hackathons/<str:hackathon_id>/` | HackathonOrganiserAPI | Login | none observed | — | KeyError: 'muid' (admin) | M-53 |
+| DELETE | `/api/v1/hackathon/list-organiser-hackathons/<str:hackathon_id>/` | HackathonOrganiserAPI | Login | none observed | — | TypeError: HackathonOrganiserAPI.delete() got an unexpected keyword ar (admin) | M-53 |
+| GET | `/api/v1/hackathon/add-organiser/<str:hackathon_id>/` | HackathonOrganiserAPI | Login | Admin | — | — | M-53 |
+| POST | `/api/v1/hackathon/add-organiser/<str:hackathon_id>/` | HackathonOrganiserAPI | Login | none observed | — | KeyError: 'muid' (admin) | M-53 |
+| DELETE | `/api/v1/hackathon/add-organiser/<str:hackathon_id>/` | HackathonOrganiserAPI | Login | none observed | — | TypeError: HackathonOrganiserAPI.delete() got an unexpected keyword ar (admin) | M-53 |
+| GET | `/api/v1/hackathon/delete-organiser/<str:organiser_link_id>/` | HackathonOrganiserAPI | Login | none observed | — | TypeError: HackathonOrganiserAPI.get() got an unexpected keyword argum (admin) | M-53 |
+| POST | `/api/v1/hackathon/delete-organiser/<str:organiser_link_id>/` | HackathonOrganiserAPI | Login | none observed | — | TypeError: HackathonOrganiserAPI.post() got an unexpected keyword argu (admin) | M-53 |
+| DELETE | `/api/v1/hackathon/delete-organiser/<str:organiser_link_id>/` | HackathonOrganiserAPI | Login | Admin | — | — | M-53 |
+| GET | `/api/v1/hackathon/list-applicants/` | ListApplicantsAPI | Login | none observed | — | AttributeError: 'NoneType' object has no attribute 'get' (admin) | M-53 |
+| GET | `/api/v1/hackathon/list-applicants/<str:hackathon_id>/` | ListApplicantsAPI | Login | none observed | — | AttributeError: 'NoneType' object has no attribute 'get' (admin) | M-53 |
+| GET | `/api/v1/hackathon/list-form/<str:hackathon_id>/` | ListHackathonFormAPI | Login | Admin | — | — | M-53 |
+| GET | `/api/v1/hackathon/list-organisations/` | ListOrganisations | Login | Admin | — | — | M-53 |
+| GET | `/api/v1/hackathon/list-districts/` | ListDistricts | Login | Admin | — | — | M-53 |
+| GET | `/api/v1/hackathon/list-default-form-fields/` | GetDefaultFieldsAPI | Login | Admin | — | — | M-53 |
+
+#### `integrations` (20 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| POST | `/api/v1/integrations/kkem/login/` | KKEMIntegrationLogin | **Public** | any logged-in | — | — | L-12 |
+| POST | `/api/v1/integrations/kkem/authorization/` | KKEMAuthorizationAPI | **Public** | any logged-in | — | — | L-12 |
+| PATCH | `/api/v1/integrations/kkem/authorization/` | KKEMAuthorizationAPI | Public? (anon→500) | ? (500) | — | TypeError: KKEMAuthorizationAPI.patch() missing 1 required positional  (admin,anon,associate,campusiglead,campus) | L-12 |
+| POST | `/api/v1/integrations/kkem/authorization/<str:token>/` | KKEMAuthorizationAPI | Public? (anon→500) | ? (500) | — | TypeError: KKEMAuthorizationAPI.post() got an unexpected keyword argum (admin,anon,associate,campusiglead,campus) | L-12 |
+| PATCH | `/api/v1/integrations/kkem/authorization/<str:token>/` | KKEMAuthorizationAPI | Public? (anon→500) | ? (500) | — | DecodeError: Not enough segments (admin,anon,associate,campusiglead,campus) | L-12 |
+| GET | `/api/v1/integrations/kkem/user/status/<str:encrypted_data>/` | KKEMUserStatusAPI | **Public** | any logged-in | — | — | L-12 |
+| GET | `/api/v1/integrations/kkem/user/<str:encrypted_data>/` | KKEMdetailsFetchAPI | **Public** | any logged-in | — | — | L-12 |
+| GET | `/api/v1/integrations/kkem/users/` | KKEMBulkKarmaAPI | Public? (anon→500) | ? (500) | — | CustomException: Invalid Authorization header (admin,anon,associate,campusiglead,campus) | L-12 |
+| GET | `/api/v1/integrations/kkem/users/<str:muid>/` | KKEMIndividualKarmaAPI | Public? (anon→500) | ? (500) | — | CustomException: Invalid Authorization header (admin,anon,associate,campusiglead,campus) | L-12 |
+| GET | `/api/v1/integrations/kkem/hackathon-stats/` | HackathonStatsAPI | Public? (anon→500) | ? (500) | — | CustomException: Invalid Authorization header (admin,anon,associate,campusiglead,campus) | L-12 |
+| POST | `/api/v1/integrations/wadhwani/auth-token/` | WadhwaniAuthToken | **Public** | any logged-in | features/courses/api/courses.api.ts:19 | — | H-15 |
+| POST | `/api/v1/integrations/wadhwani/user-login/` | WadhwaniUserLogin | Login (anon→500) | any logged-in | features/courses/api/courses.api.ts:38 | IndexError: list index out of range (anon) | H-15, L-10 |
+| POST | `/api/v1/integrations/wadhwani/course-details/` | WadhwaniCourseDetails | **Public** | any logged-in | features/courses/api/courses.api.ts:27 | — | H-15 |
+| POST | `/api/v1/integrations/wadhwani/course-enroll-status/` | WadhwaniCourseEnrollStatus | Login (anon→500) | any logged-in | — | IndexError: list index out of range (anon) | H-15 |
+| POST | `/api/v1/integrations/wadhwani/course-quiz-data/` | WadhwaniCourseQuizData | **Public** | any logged-in | — | — | H-15 |
+| POST | `/api/v1/integrations/qseverse/issue-vc/` | IssueVerifiableCredentialView | **Public** | any logged-in | features/profile/api/profile.api.ts:480 | — | H-15 |
+| GET | `/api/v1/integrations/qseverse/connected-users/` | GetAllConnectedUsersView | **Public** | any logged-in | — | — | H-15 |
+| GET | `/api/v1/integrations/qseverse/connected-users/search` | GetConnectedUserView | **Public** | any logged-in | features/connect/api/connect.api.ts:11, features/profile/api/profile.api.ts:467 | — | H-15 |
+| GET | `/api/v1/integrations/qseverse/qs-credentials/` | GetQSCredentialsView | **Public** | any logged-in | features/achievements/api/achievements.api.ts:88 | — | H-15 |
+| GET | `/api/v1/integrations/mufifa/verify-task/` | ExternalTaskVerificationAPI | **Public** | any logged-in | — | — | — |
+
+#### `launchpad` (52 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| POST | `/api/v1/launchpad/register-company/` | RegisterCompanyAPI | **Public** | any logged-in | — | — | M-50 |
+| POST | `/api/v1/launchpad/register-recruiter/` | RegisterRecruiterAPI | Login | ? (500) | — | KeyError: 'user_type' (admin,associate,campusiglead,campuslead,) | M-50 |
+| GET | `/api/v1/launchpad/company-list/` | CompanyListAPI | Login | Admin | — | — | M-50 |
+| GET | `/api/v1/launchpad/company-list-verified/` | CompanyListVerifiedAPI | **Public** | any logged-in | — | — | M-50 |
+| POST | `/api/v1/launchpad/login-company/` | LoginCompanyAPI | **Public** | any logged-in | — | — | M-50 |
+| POST | `/api/v1/launchpad/login-recruiter/` | LoginRecruiterAPI | **Public** | any logged-in | — | — | M-50 |
+| POST | `/api/v1/launchpad/refresh-token/` | RefreshTokenAPI | **Public** | any logged-in | — | — | M-50 |
+| POST | `/api/v1/launchpad/add-job/` | AddJobAPI | Login | ? (500) | — | KeyError: 'user_type' (admin,associate,campusiglead,campuslead,) | M-50 |
+| GET | `/api/v1/launchpad/job/<str:job_id>/` | JobAPI | Login | ? (500) | — | KeyError: 'user_type' (admin,associate,campusiglead,campuslead,) | M-50 |
+| PUT | `/api/v1/launchpad/job/<str:job_id>/` | JobAPI | Login | ? (500) | — | KeyError: 'user_type' (admin,associate,campusiglead,campuslead,) | M-50 |
+| DELETE | `/api/v1/launchpad/job/<str:job_id>/` | JobAPI | Login | ? (500) | — | KeyError: 'user_type' (admin,associate,campusiglead,campuslead,) | M-50 |
+| POST | `/api/v1/launchpad/company-info/` | GetCompanyInfoAPI | **Public** | any logged-in | — | — | C-04, M-50 |
+| POST | `/api/v1/launchpad/recruiter-info/` | GetRecruiterInfoAPI | **Public** | any logged-in | — | — | C-04, M-50 |
+| POST | `/api/v1/launchpad/company-verify/` | CompanyVerifyAPI | Login | Admin | — | — | M-50 |
+| GET | `/api/v1/launchpad/list-jobs/` | ListJobsAPI | Login | any logged-in | — | — | M-50 |
+| POST | `/api/v1/launchpad/verify-task/` | VerifyTaskAPI | Login | Admin | — | — | M-50 |
+| GET | `/api/v1/launchpad/list-launchpad-students/<str:job_id>/` | ListLaunchpadStudentsAPI | Login | ? (500) | — | KeyError: 'user_type' (admin,associate,campusiglead,campuslead,) | M-50, H-26 |
+| GET | `/api/v1/launchpad/hire-requests/` | HireRequestsAPI | Login | ? (500) | — | KeyError: 'user_type' (admin,associate,campusiglead,campuslead,) | M-50 |
+| POST | `/api/v1/launchpad/send-job-invitations/` | SendJobInvitationsAPI | Login | ? (500) | — | KeyError: 'user_type' (admin,associate,campusiglead,campuslead,) | M-50 |
+| GET | `/api/v1/launchpad/student/job-invitations/` | StudentJobInvitationsAPI | Login | any logged-in | — | — | M-50 |
+| POST | `/api/v1/launchpad/student/apply-to-job/` | StudentApplyToJobAPI | Login | any logged-in | — | — | M-50 |
+| GET | `/api/v1/launchpad/accepted-students/` | AcceptedStudentsAPI | Login | ? (500) | — | KeyError: 'user_type' (admin,associate,campusiglead,campuslead,) | M-50 |
+| GET | `/api/v1/launchpad/accepted-students/<str:job_id>/` | AcceptedStudentsAPI | Login | ? (500) | — | KeyError: 'user_type' (admin,associate,campusiglead,campuslead,) | M-50 |
+| POST | `/api/v1/launchpad/schedule-interview/` | ScheduleInterviewAPI | Login | any logged-in | — | — | M-50 |
+| POST | `/api/v1/launchpad/application-final-decision/` | ApplicationFinalDecisionAPI | Login | ? (500) | — | KeyError: 'user_type' (admin,associate,campusiglead,campuslead,) | M-50 |
+| PATCH | `/api/v1/launchpad/delete-company/` | DeleteCompanyAPI | Login (anon→500) | Admin | — | IndexError: list index out of range (anon) | C-04, M-50 |
+| GET | `/api/v1/launchpad/leaderboard/` | Leaderboard | **Public** | any logged-in | — | — | M-50 |
+| GET | `/api/v1/launchpad/task-completed-leaderboard/` | TaskCompletedLeaderboard | **Public** | any logged-in | — | — | M-50 |
+| GET | `/api/v1/launchpad/list-participants/` | ListParticipantsAPI | **Public** | any logged-in | — | — | M-50 |
+| GET | `/api/v1/launchpad/launchpad-details/` | LaunchpadDetailsCount | **Public** | any logged-in | — | — | M-50 |
+| GET | `/api/v1/launchpad/college-data/` | CollegeData | **Public** | any logged-in | — | — | M-50 |
+| GET | `/api/v1/launchpad/user-college-link/` | LaunchPadUser | Login | none observed | — | — | C-04, M-50 |
+| POST | `/api/v1/launchpad/user-college-link/` | LaunchPadUser | Login | none observed | — | — | C-04, M-50 |
+| PUT | `/api/v1/launchpad/user-college-link/` | LaunchPadUser | Public? (anon→500) | ? (500) | — | TypeError: LaunchPadUser.put() missing 1 required positional argument: (admin,anon,associate,campusiglead,campus) | C-04, M-50 |
+| GET | `/api/v1/launchpad/user-college-link/<str:email>` | LaunchPadUser | Public? (anon→500) | ? (500) | — | TypeError: LaunchPadUser.get() got an unexpected keyword argument 'ema (admin,anon,associate,campusiglead,campus) | C-04, M-50 |
+| POST | `/api/v1/launchpad/user-college-link/<str:email>` | LaunchPadUser | Public? (anon→500) | ? (500) | — | TypeError: LaunchPadUser.post() got an unexpected keyword argument 'em (admin,anon,associate,campusiglead,campus) | C-04, M-50 |
+| PUT | `/api/v1/launchpad/user-college-link/<str:email>` | LaunchPadUser | Login | none observed | — | — | C-04, M-50 |
+| GET | `/api/v1/launchpad/user-college-link-public/<str:email>` | LaunchPadUserPublic | **Public** | any logged-in | — | — | C-04, M-50 |
+| GET | `/api/v1/launchpad/user-profile/` | UserProfile | Login | none observed | — | — | C-04, M-50 |
+| PUT | `/api/v1/launchpad/user-profile/` | UserProfile | Login | none observed | — | — | C-04, M-50 |
+| GET | `/api/v1/launchpad/user-college-data/` | UserBasedCollegeData | Login | none observed | — | — | M-50 |
+| POST | `/api/v1/launchpad/bulk-user-college-link/` | BulkLaunchpadUser | Login | none observed | — | — | C-04, M-50 |
+| GET | `/api/v1/launchpad/list-participants-admin/` | LaunchPadListAdmin | Login | none observed | — | — | M-50 |
+| GET | `/api/v1/launchpad/user-details/<str:launchpad_id>/` | UserProfileAPI | Login | none observed | — | — | M-50 |
+| GET | `/api/v1/launchpad/socials/<str:launchpad_id>/` | GetSocialsAPI | Login | none observed | — | — | M-50 |
+| GET | `/api/v1/launchpad/user-log/<str:launchpad_id>/` | UserLogAPI | Login | none observed | — | — | M-50 |
+| GET | `/api/v1/launchpad/get-user-levels/<str:launchpad_id>/` | UserLevelsAPI | Login | none observed | — | — | M-50 |
+| GET | `/api/v1/launchpad/ig-leaderboard/` | IGLeaderboardView | **Public** | any logged-in | — | — | M-50 |
+| POST | `/api/v1/launchpad/forgot-password/` | ForgotPasswordAPI | **Public** | any logged-in | — | — | M-50 |
+| POST | `/api/v1/launchpad/reset-password/` | ResetPasswordAPI | **Public** | any logged-in | — | — | M-50 |
+| POST | `/api/v1/launchpad/verify-reset-token/` | VerifyResetTokenAPI | **Public** | any logged-in | — | — | M-50 |
+| POST | `/api/v1/launchpad/change-password/` | ChangePasswordAPI | Login | ? (500) | — | KeyError: 'user_type' (admin,associate,campusiglead,campuslead,) | M-50 |
+
+#### `leaderboard` (9 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/leaderboard/students/` | StudentsLeaderboard | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/leaderboard/students-monthly/` | StudentsMonthlyLeaderboard | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/leaderboard/college/` | CollegeLeaderboard | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/leaderboard/college-monthly/` | CollegeMonthlyLeaderboard | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/leaderboard/wadhwani-college/` | WadhwaniCollegeLeaderboard | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/leaderboard/wadhwani-zonal/` | WadhwaniZonalLeaderboard | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/leaderboard/ig-mentor/<str:ig_id>/` | IGMentorLeaderboard | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/leaderboard/campus-mentor/<str:campus_id>/` | CampusMentorLeaderboard | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/leaderboard/company-mentor/<str:company_id>/` | CompanyMentorLeaderboard | **Public** | any logged-in | — | — | — |
+
+#### `muComics` (52 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/muComics/comics/genres/` | GenreListCreateView | **Public** | any logged-in | — | — | — |
+| POST | `/api/v1/muComics/comics/genres/` | GenreListCreateView | Login | Admin | — | — | — |
+| GET | `/api/v1/muComics/comics/genres/<str:genre_id>/` | GenreDetailView | **Public** | any logged-in | — | — | — |
+| PATCH | `/api/v1/muComics/comics/genres/<str:genre_id>/` | GenreDetailView | Login | Admin | — | — | — |
+| DELETE | `/api/v1/muComics/comics/genres/<str:genre_id>/` | GenreDetailView | Login | Admin | — | — | — |
+| POST | `/api/v1/muComics/comics/genres/<str:genre_id>/reinstate/` | GenreReinstateView | Login | Admin | — | — | — |
+| GET | `/api/v1/muComics/comics/` | ComicListCreateView | **Public** | any logged-in | — | — | — |
+| POST | `/api/v1/muComics/comics/` | ComicListCreateView | Login | Admin | — | — | — |
+| GET | `/api/v1/muComics/comics/<str:comic_id>/` | ComicDetailView | **Public** | any logged-in | — | — | — |
+| PATCH | `/api/v1/muComics/comics/<str:comic_id>/` | ComicDetailView | Login | none observed | — | — | — |
+| DELETE | `/api/v1/muComics/comics/<str:comic_id>/` | ComicDetailView | Login | none observed | — | — | — |
+| POST | `/api/v1/muComics/comics/<str:comic_id>/publish/` | ComicPublishView | Login | none observed | — | — | — |
+| POST | `/api/v1/muComics/comics/<str:comic_id>/archive/` | ComicArchiveView | Login | none observed | — | — | — |
+| POST | `/api/v1/muComics/comics/<str:comic_id>/unarchive/` | ComicUnarchiveView | Login | none observed | — | — | — |
+| GET | `/api/v1/muComics/comics/<str:comic_id>/contributors/` | ComicContributorListView | **Public** | any logged-in | — | — | — |
+| POST | `/api/v1/muComics/comics/<str:comic_id>/contributors/` | ComicContributorListView | Login | Admin | — | — | — |
+| PATCH | `/api/v1/muComics/comics/<str:comic_id>/contributors/<str:contributor_id>/` | ComicContributorDetailView | Login | Admin | — | — | — |
+| DELETE | `/api/v1/muComics/comics/<str:comic_id>/contributors/<str:contributor_id>/` | ComicContributorDetailView | Login | Admin | — | — | — |
+| POST | `/api/v1/muComics/comics/<str:comic_id>/genres/` | ComicGenreListView | Login | Admin | — | — | — |
+| DELETE | `/api/v1/muComics/comics/<str:comic_id>/genres/<str:link_id>/` | ComicGenreDetailView | Login | Admin | — | — | — |
+| GET | `/api/v1/muComics/comments/comic/<str:comic_id>/list/` | ComicCommentListAPI | **Public** | any logged-in | — | — | — |
+| POST | `/api/v1/muComics/comments/comic/<str:comic_id>/create/` | ComicCommentCreateAPI | Login | any logged-in | — | — | — |
+| GET | `/api/v1/muComics/comments/chapter/<str:chapter_id>/list/` | ChapterCommentListAPI | **Public** | any logged-in | — | — | — |
+| POST | `/api/v1/muComics/comments/chapter/<str:chapter_id>/create/` | ChapterCommentCreateAPI | Login | any logged-in | — | — | — |
+| GET | `/api/v1/muComics/comments/admin/` | AdminCommentListAPI | Login | Comic Admin | — | — | — |
+| DELETE | `/api/v1/muComics/comments/admin/<str:comment_id>/` | AdminCommentDeleteAPI | Login | Comic Admin | — | — | — |
+| PATCH | `/api/v1/muComics/comments/<str:comment_id>/` | CommentDetailAPI | Login | any logged-in | — | — | — |
+| DELETE | `/api/v1/muComics/comments/<str:comment_id>/` | CommentDetailAPI | Login | any logged-in | — | — | — |
+| POST | `/api/v1/muComics/chapters/upload-url/` | ChapterUploadURLAPI | Login | any logged-in | — | — | — |
+| GET | `/api/v1/muComics/chapters/` | ChapterListCreateView | Login | any logged-in | — | — | — |
+| POST | `/api/v1/muComics/chapters/` | ChapterListCreateView | Login | any logged-in | — | — | — |
+| GET | `/api/v1/muComics/chapters/<str:chapter_id>/` | ChapterDetailView | Login | any logged-in | — | — | — |
+| PATCH | `/api/v1/muComics/chapters/<str:chapter_id>/` | ChapterDetailView | Login | any logged-in | — | — | — |
+| DELETE | `/api/v1/muComics/chapters/<str:chapter_id>/` | ChapterDetailView | Login | any logged-in | — | — | — |
+| POST | `/api/v1/muComics/chapters/<str:chapter_id>/publish/` | ChapterPublishView | Login | any logged-in | — | — | — |
+| POST | `/api/v1/muComics/chapters/<str:chapter_id>/archive/` | ChapterArchiveView | Login | any logged-in | — | — | — |
+| GET | `/api/v1/muComics/chapters/<str:chapter_id>/pages/` | ChapterPageListCreateAPI | Login | any logged-in | — | — | — |
+| POST | `/api/v1/muComics/chapters/<str:chapter_id>/pages/` | ChapterPageListCreateAPI | Login | any logged-in | — | — | — |
+| POST | `/api/v1/muComics/chapters/<str:chapter_id>/pages/reorder/` | ChapterPageReorderAPI | Login | any logged-in | — | — | — |
+| POST | `/api/v1/muComics/chapters/<str:chapter_id>/pages/register/` | ChapterRegisterImagesAPI | Login | any logged-in | — | — | — |
+| PATCH | `/api/v1/muComics/chapters/pages/<str:page_id>/` | ChapterPageDetailAPI | Login | none observed | — | — | — |
+| DELETE | `/api/v1/muComics/chapters/pages/<str:page_id>/` | ChapterPageDetailAPI | Login | none observed | — | — | — |
+| GET | `/api/v1/muComics/reader/me/` | ReaderDashboardAPI | Login | any logged-in | — | — | — |
+| GET | `/api/v1/muComics/reader/me/bookmarks/` | MyBookmarksAPI | Login | any logged-in | — | — | — |
+| GET | `/api/v1/muComics/reader/me/progress/` | MyReadingProgressAPI | Login | any logged-in | — | — | — |
+| POST | `/api/v1/muComics/reader/comics/<str:comic_id>/likes/` | LikeComicAPI | Login | any logged-in | — | — | — |
+| DELETE | `/api/v1/muComics/reader/comics/<str:comic_id>/likes/` | LikeComicAPI | Login | any logged-in | — | — | — |
+| POST | `/api/v1/muComics/reader/comics/<str:comic_id>/bookmarks/` | BookmarkComicAPI | Login | any logged-in | — | — | — |
+| DELETE | `/api/v1/muComics/reader/comics/<str:comic_id>/bookmarks/` | BookmarkComicAPI | Login | any logged-in | — | — | — |
+| GET | `/api/v1/muComics/reader/comics/<str:comic_id>/interaction-status/` | InteractionStatusAPI | Login | any logged-in | — | — | — |
+| GET | `/api/v1/muComics/reader/comics/<str:comic_id>/progress/` | ReadingProgressAPI | Login | any logged-in | — | — | — |
+| PUT | `/api/v1/muComics/reader/comics/<str:comic_id>/progress/` | ReadingProgressAPI | Login | any logged-in | — | — | — |
+
+#### `notification` (13 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/notification/` | NotificationListView | Login | any logged-in | features/notification/api/notification.api.ts:70 | — | H-04, M-12, M-18 |
+| GET | `/api/v1/notification/unread-count/` | UnreadCountView | Login | any logged-in | features/notification/api/notification.api.ts:79 | — | M-12, M-18 |
+| PATCH | `/api/v1/notification/read-all/` | MarkAllReadView | Login | any logged-in | features/notification/api/notification.api.ts:93 | — | M-12, M-18 |
+| PATCH | `/api/v1/notification/read/` | MarkReadBulkView | Login | none observed | features/notification/api/notification.api.ts:98 | — | M-12, M-18 |
+| PATCH | `/api/v1/notification/<str:notification_id>/read/` | MarkReadView | Login | any logged-in | features/notification/api/notification.api.ts:88 | — | M-12, M-18 |
+| PATCH | `/api/v1/notification/<str:notification_id>/archive/` | ArchiveView | Login | any logged-in | — | — | M-12, M-18 |
+| DELETE | `/api/v1/notification/<str:notification_id>/` | DeleteOneView | Login | any logged-in | features/notification/api/notification.api.ts:103 | — | M-12, M-18 |
+| DELETE | `/api/v1/notification/delete/all/` | DeleteAllView | Login | any logged-in | features/notification/api/notification.api.ts:25 | — | M-12, M-18 |
+| DELETE | `/api/v1/notification/broadcast/delete/id/<str:broadcast_id>/` | BroadcastNotificationDeleteAPI | Login | Admin | features/notification/api/notification.api.ts:54 | — | M-12, M-18 |
+| DELETE | `/api/v1/notification/broadcast/delete/all/` | BroadcastNotificationDeleteAllAPI | Login | Admin | features/notification/api/notification.api.ts:58 | — | M-12, M-18 |
+| GET | `/api/v1/notification/broadcast/list/all/` | BroadcastNotificationListAPI | Login | Admin | features/notification/api/notification.api.ts:29 | — | M-12, M-18 |
+| POST | `/api/v1/notification/broadcast/create/` | BroadcastNotificationCreateAPI | Login | Admin | features/notification/api/notification.api.ts:37 | — | M-12, M-18 |
+| PATCH | `/api/v1/notification/broadcast/update/id/<str:broadcast_id>/` | BroadcastNotificationUpdateAPI | Login | Admin | features/notification/api/notification.api.ts:47 | — | M-12, M-18 |
+
+#### `protected` (2 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/protected/organisation/institutes/<str:organisation_type>/<str:district_name>/` | GetInstitutionsAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/protected/organisation/get-institutes/<str:district_name>/` | RetrieveInstitutesAPI | **Public** | any logged-in | — | — | L-39 |
+
+#### `public` (30 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/public/campus-details/<str:college_code>/` | CollegeDetailsAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/lc-list` | LcListAPI | Public? (anon→500) | ? (500) | — | ImproperlyConfigured: Field name `name` is not valid for model `Learni (admin,anon,associate,campusiglead,campus) | H-28 |
+| GET | `/api/v1/public/<str:circle_id>/lc-details/` | LcDetailsAPI | Public? (anon→500) | ? (500) | — | ImproperlyConfigured: Field name `name` is not valid for model `Learni (admin,anon,associate,campusiglead,campus) | H-28 |
+| GET | `/api/v1/public/lc-dashboard/` | LcDashboardAPI | Public? (anon→500) | ? (500) | — | FieldError: Cannot resolve keyword 'name' into field. Choices are: cac (admin,anon,associate,campusiglead,campus) | H-28 |
+| GET | `/api/v1/public/lc-report/` | LcReportAPI | Public? (anon→500) | ? (500) | — | FieldError: Cannot resolve keyword 'name' into field. Choices are: cac (admin,anon,associate,campusiglead,campus) | H-28 |
+| GET | `/api/v1/public/college-wise-lc-report/` | CollegeWiseLcReport | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/college-wise-lc-report/csv/` | CollegeWiseLcReportCSV | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/lc-report/csv/` | LcReportDownloadAPI | Public? (anon→500) | ? (500) | — | FieldError: Cannot resolve keyword 'name' into field. Choices are: cac (admin,anon,associate,campusiglead,campus) | H-28 |
+| GET | `/api/v1/public/lc-enrollment/` | LearningCircleEnrollment | Public? (anon→500) | ? (500) | — | FieldError: Cannot resolve keyword 'name' into field. Choices are: cac (admin,anon,associate,campusiglead,campus) | H-28 |
+| GET | `/api/v1/public/lc-enrollment/csv/` | LearningCircleEnrollmentCSV | Public? (anon→500) | ? (500) | — | FieldError: Cannot resolve keyword 'name' into field. Choices are: cac (admin,anon,associate,campusiglead,campus) | H-28 |
+| GET | `/api/v1/public/global-count/` | GlobalCountAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/gta-sandshore/` | GTASANDSHOREAPI | Public? (anon→500) | ? (500) | — | TypeError: int() argument must be a string, a bytes-like object or a r (admin,anon,associate,campusiglead,campus) | M-51 |
+| GET | `/api/v1/public/profile-pic/<str:muid>/` | UserProfilePicAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/list-ig/` | ListIGAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/list-ig-top100/` | ListTopIgUsersAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/list/levels/` | ListAllLevelInfo | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/leaderboard/top-100/` | BekenAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/list/college/` | LcCollegeAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/list/district/` | LcDistrictAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/list/state/` | LcStateAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/list/country/` | LcCountryAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/external/user/` | ExternalUserDetailsAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/jobs/` | PublicJobAPI | Login | any logged-in | features/home/api/home.api.ts:74 | — | — |
+| GET | `/api/v1/public/ig/list/` | PublicInterestGroupListApi | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/ig/<str:pk>/` | IGDetailAPI | **Public** | any logged-in | features/interest-groups/api/interest-groups.api.ts:64 | — | — |
+| GET | `/api/v1/public/career-lab/ongoing/` | PublicOngoingHiringAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/career-lab/previous/` | PublicPreviousHiringAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/events/` | PublicEventListAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/events/featured/` | PublicEventFeaturedAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/public/events/<str:event_id>/` | PublicEventDetailAPI | **Public** | any logged-in | — | — | — |
+
+#### `register` (22 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| POST | `/api/v1/register/` | RegisterDataAPI | **Public** | any logged-in | features/auth/api/register.api.ts:27 | — | C-09, M-52, L-15 |
+| GET | `/api/v1/register/role/list/` | RoleAPI | **Public** | any logged-in | features/manage-users/api/manageUsers.api.ts:123, features/onboarding/api/onboarding.api.ts:82 | — | C-09 |
+| GET | `/api/v1/register/colleges/` | CollegesAPI | **Public** | any logged-in | features/notification/api/notification.api.ts:130, features/onboarding/api/onboarding.api.ts:36 | — | — |
+| GET | `/api/v1/register/department/list/` | DepartmentAPI | **Public** | any logged-in | features/onboarding/api/onboarding.api.ts:54, features/onboarding/api/onboarding.api.ts:65 (+1) | — | — |
+| GET | `/api/v1/register/location/` | LocationSearchView | **Public** | any logged-in | features/manage-users/api/manageUsers.api.ts:151 | — | — |
+| GET | `/api/v1/register/country/list/` | CountryAPI | **Public** | any logged-in | features/manage-users/api/manageUsers.api.ts:165, features/onboarding/api/onboarding.api.ts:124 (+1) | — | — |
+| POST | `/api/v1/register/state/list/` | StateAPI | **Public** | any logged-in | features/manage-users/api/manageUsers.api.ts:180, features/onboarding/api/onboarding.api.ts:132 (+1) | — | — |
+| POST | `/api/v1/register/district/list/` | DistrictAPI | **Public** | any logged-in | features/manage-users/api/manageUsers.api.ts:197, features/onboarding/api/onboarding.api.ts:144 (+2) | — | — |
+| POST | `/api/v1/register/college/list/` | CollegeAPI | **Public** | any logged-in | features/manage-users/api/manageUsers.api.ts:216, features/profile/api/profile.api.ts:379 | — | — |
+| GET | `/api/v1/register/company/list/` | CompanyAPI | **Public** | any logged-in | features/onboarding/api/onboarding.api.ts:75 | — | — |
+| GET | `/api/v1/register/community/list/` | CommunityAPI | **Public** | any logged-in | features/manage-users/api/manageUsers.api.ts:114, features/profile/api/profile.api.ts:317 | — | — |
+| POST | `/api/v1/register/schools/list/` | SchoolAPI | **Public** | any logged-in | features/manage-users/api/manageUsers.api.ts:221, features/profile/api/profile.api.ts:384 | — | — |
+| GET | `/api/v1/register/area-of-interest/list/` | AreaOfInterestAPI | **Public** | any logged-in | features/manage-users/api/manageUsers.api.ts:142 | — | — |
+| POST | `/api/v1/register/lc/user-validation/` | LearningCircleUserViewAPI | **Public** | any logged-in | — | — | H-22 |
+| POST | `/api/v1/register/email-verification/` | UserEmailVerificationAPI | **Public** | any logged-in | features/auth/api/register.api.ts:83 | — | L-17 |
+| GET | `/api/v1/register/user-country/` | UserCountryAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/register/user-state/` | UserStateAPI | **Public** | any logged-in | — | — | — |
+| GET | `/api/v1/register/user-zone/` | UserZoneAPI | **Public** | any logged-in | — | — | — |
+| POST | `/api/v1/register/select-domains/` | UserDomainSelectionAPI | Login | any logged-in | features/onboarding/api/onboarding.api.ts:159 | — | L-18 |
+| POST | `/api/v1/register/select-endgoals/` | UserEndgoalSelectionAPI | Login | any logged-in | features/onboarding/api/onboarding.api.ts:170 | — | L-18 |
+| GET | `/api/v1/register/connect-discord/` | ConnectDiscordAPI | Login | any logged-in | features/connect/api/connect.api.ts:24 | — | L-20 |
+| POST | `/api/v1/register/organization/create/` | UnverifiedOrganizationCreateView | Login | any logged-in | features/onboarding/api/onboarding.api.ts:109 | — | — |
+
+#### `top100` (1 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/top100/leaderboard/` | Leaderboard | Public? (anon→500) | ? (500) | — | OperationalError: no such column: u.profile_pic (admin,anon,associate,campusiglead,campus) | M-49 |
+
+#### `url-shortener` (17 endpoints)
+
+| Method | Path | View | Login | Roles that got through (tested) | Used by dashboard | 500 seen (persona) | Issues |
+|---|---|---|---|---|---|---|---|
+| GET | `/api/v1/url-shortener/create/` | UrlShortenerAPI | Login | Admin, Associate, Fellow | — | — | — |
+| POST | `/api/v1/url-shortener/create/` | UrlShortenerAPI | Login | Admin, Associate, Fellow | features/url-shortener/api/shortener.api.ts:52 | — | — |
+| PUT | `/api/v1/url-shortener/create/` | UrlShortenerAPI | Login | none observed | — | TypeError: UrlShortenerAPI.put() missing 1 required positional argumen (admin,associate,fellow) | — |
+| DELETE | `/api/v1/url-shortener/create/` | UrlShortenerAPI | Login | none observed | — | TypeError: UrlShortenerAPI.delete() missing 1 required positional argu (admin,associate,fellow) | — |
+| GET | `/api/v1/url-shortener/edit/<str:url_id>/` | UrlShortenerAPI | Login | none observed | — | TypeError: UrlShortenerAPI.get() got an unexpected keyword argument 'u (admin,associate,fellow) | — |
+| POST | `/api/v1/url-shortener/edit/<str:url_id>/` | UrlShortenerAPI | Login | none observed | — | TypeError: UrlShortenerAPI.post() got an unexpected keyword argument ' (admin,associate,fellow) | — |
+| PUT | `/api/v1/url-shortener/edit/<str:url_id>/` | UrlShortenerAPI | Login | Admin, Associate, Fellow | features/url-shortener/api/shortener.api.ts:63 | — | — |
+| DELETE | `/api/v1/url-shortener/edit/<str:url_id>/` | UrlShortenerAPI | Login | Admin, Associate, Fellow | — | — | — |
+| GET | `/api/v1/url-shortener/list/` | UrlShortenerAPI | Login | Admin, Associate, Fellow | features/url-shortener/api/shortener.api.ts:35 | — | — |
+| POST | `/api/v1/url-shortener/list/` | UrlShortenerAPI | Login | Admin, Associate, Fellow | — | — | — |
+| PUT | `/api/v1/url-shortener/list/` | UrlShortenerAPI | Login | none observed | — | TypeError: UrlShortenerAPI.put() missing 1 required positional argumen (admin,associate,fellow) | — |
+| DELETE | `/api/v1/url-shortener/list/` | UrlShortenerAPI | Login | none observed | — | TypeError: UrlShortenerAPI.delete() missing 1 required positional argu (admin,associate,fellow) | — |
+| GET | `/api/v1/url-shortener/delete/<str:url_id>/` | UrlShortenerAPI | Login | none observed | — | TypeError: UrlShortenerAPI.get() got an unexpected keyword argument 'u (admin,associate,fellow) | — |
+| POST | `/api/v1/url-shortener/delete/<str:url_id>/` | UrlShortenerAPI | Login | none observed | — | TypeError: UrlShortenerAPI.post() got an unexpected keyword argument ' (admin,associate,fellow) | — |
+| PUT | `/api/v1/url-shortener/delete/<str:url_id>/` | UrlShortenerAPI | Login | Admin, Associate, Fellow | — | — | — |
+| DELETE | `/api/v1/url-shortener/delete/<str:url_id>/` | UrlShortenerAPI | Login | Admin, Associate, Fellow | features/url-shortener/api/shortener.api.ts:71 | — | — |
+| GET | `/api/v1/url-shortener/get-analytics/<str:url_id>/` | UrlAnalyticsAPI | Login | Admin, Associate, Fellow | features/url-shortener/api/shortener.api.ts:81 | — | — |
+
+## Appendix F — Every dashboard page (browser crawl)
+
+"Opened OK as" lists the tested roles that stayed on the page; "Redirected" lists roles the edge proxy or guard sent elsewhere (usually correct). "Problems" are what the browser saw for roles that were allowed on the page.
+
+| # | Page | Page file → main component | Opened OK as (tested roles) | Redirected | API calls on load | Problems seen in the crawl | Issues |
+|---|---|---|---|---|---|---|---|
+| 1 | `/` | `src/app/page.tsx` | — | Admin → /dashboard; Anonymous → /login; Student → /dashboard | 9 | none | — |
+| 2 | `/callback` | `src/app/(auth)/callback/page.tsx`<br>→ `./callback-page-client` | Admin, Anonymous, Student | — | 0 | none | M-25 |
+| 3 | `/dashboard` | `src/app/(dashboard)/dashboard/page.tsx`<br>→ `@/features/home` | Admin, Associate, Campus IG Lead, Campus Lead, Comic Admin, Company, Discord Mod, District Lead, Enabler, Fellow, IG Lead, Intern, Intern Lead, Lead Enabler, Mentor, Student, Tech Team, Zonal Lead | Anonymous → /login | 24 | none | M-58, L-27, M-16, M-29 |
+| 4 | `/dashboard/campus/[id]` | `src/app/(dashboard)/dashboard/campus/[id]/page.tsx`<br>→ `@/features/campus` | Admin, Campus IG Lead, Campus Lead, Enabler, Lead Enabler, Student | Anonymous → /login | 6 | none | L-42, H-35 |
+| 5 | `/dashboard/campus/manage` | `src/app/(dashboard)/dashboard/campus/manage/page.tsx` | Campus Lead, Enabler, Lead Enabler | Admin → /dashboard; Anonymous → /login; Campus IG Lead → /dashboard; Student → /dashboard | 20 | none | C-06, C-07, H-23, L-50 |
+| 6 | `/dashboard/changelog` | `src/app/(dashboard)/dashboard/changelog/page.tsx`<br>→ `@/components/ui/button` | Admin, Student | Anonymous → /login | 4 | none | — |
+| 7 | `/dashboard/company` | `src/app/(dashboard)/dashboard/company/page.tsx`<br>→ `@/components/ui/card` | Company | Admin → /dashboard; Anonymous → /login; Mentor → /dashboard; Student → /dashboard | 16 | none | — |
+| 8 | `/dashboard/company/admin` | `src/app/(dashboard)/dashboard/company/admin/page.tsx`<br>→ `@/features/company-jobs/components/admin/company-admins-client` | Company | Admin → /dashboard; Anonymous → /login; Mentor → /dashboard; Student → /dashboard | 18 | API GET /api/v1/dashboard/company/user-status/ → 400 {"general":["You do not have the required role to access this page."]} [Company] | H-12, H-33 |
+| 9 | `/dashboard/company/analytics` | `src/app/(dashboard)/dashboard/company/analytics/page.tsx`<br>→ `./company-analytics-client` | Company | Admin → /dashboard; Anonymous → /login; Mentor → /dashboard; Student → /dashboard | 17 | none | — |
+| 10 | `/dashboard/company/collaborations` | `src/app/(dashboard)/dashboard/company/collaborations/page.tsx`<br>→ `@/features/company-jobs/components/collaborations/company-collaborations-client` | Company | Admin → /dashboard; Anonymous → /login; Mentor → /dashboard; Student → /dashboard | 18 | Console: error: %o %s TypeError: myCollaborations.filter is not a function at CompanyCollaborationsPageClient (http://localhost:3000/_next/static/chunks/src_06pr377._.js<br>Console: error: TypeError: myCollaborations.filter is not a function at CompanyCollaborationsPageClient (http://localhost:3000/_next/static/chunks/src_06pr377._.js:206:4<br>Schema mismatch: /api/v1/dashboard/company/collaborations/<br>Schema mismatch: /api/v1/dashboard/company/collaborations/discover/ | H-30 |
+| 11 | `/dashboard/company/event-templates` | `src/app/(dashboard)/dashboard/company/event-templates/page.tsx`<br>→ `@/features/company-jobs/components/templates/company-templates-client` | Company | Admin → /dashboard; Anonymous → /login; Mentor → /dashboard; Student → /dashboard | 16 | Console: error: %o %s Error: `TabsContent` must be used within `Tabs` at useContext2 (http://localhost:3000/_next/static/chunks/node_modules_%40radix-ui_0vyhvjv._.js:432<br>Console: error: Error: `TabsContent` must be used within `Tabs` at useContext2 (http://localhost:3000/_next/static/chunks/node_modules_%40radix-ui_0vyhvjv._.js:432:19) a | H-31 |
+| 12 | `/dashboard/company/feedback` | `src/app/(dashboard)/dashboard/company/feedback/page.tsx`<br>→ `@/features/company-jobs/components/feedback/company-feedback-client` | Company | Admin → /dashboard; Anonymous → /login; Mentor → /dashboard; Student → /dashboard | 18 | Console: error: %o %s TypeError: feedbackList.map is not a function at CompanyFeedbackPageClient (http://localhost:3000/_next/static/chunks/src_0dsohvp._.js:1316:56) at <br>Console: error: TypeError: feedbackList.map is not a function at CompanyFeedbackPageClient (http://localhost:3000/_next/static/chunks/src_0dsohvp._.js:1316:56) at Object<br>Schema mismatch: /api/v1/dashboard/company/feedback/list/<br>Schema mismatch: /api/v1/dashboard/company/impact-report/ | H-32 |
+| 13 | `/dashboard/company/ig-requests` | `src/app/(dashboard)/dashboard/company/ig-requests/page.tsx`<br>→ `@/features/ig-requests` | Company | Admin → /dashboard; Anonymous → /login; Mentor → /dashboard; Student → /dashboard | 17 | none | — |
+| 14 | `/dashboard/company/ig-sponsorship` | `src/app/(dashboard)/dashboard/company/ig-sponsorship/page.tsx`<br>→ `@/features/company-jobs/components/sponsorship/company-sponsorship-client` | Company | Admin → /dashboard; Anonymous → /login; Mentor → /dashboard; Student → /dashboard | 17 | API GET /api/v1/dashboard/company/ig-sponsorship/<id>/metrics/ → 400 {"general":["This Interest Group is not sponsored by your company."]} [Company] | M-08 |
+| 15 | `/dashboard/company/jobs` | `src/app/(dashboard)/dashboard/company/jobs/page.tsx`<br>→ `./company-jobs-client` | Company | Admin → /dashboard; Anonymous → /login; Mentor → /dashboard; Student → /dashboard | 17 | none | M-07, H-13, L-47, H-17 |
+| 16 | `/dashboard/company/jobs/[jobId]` | `src/app/(dashboard)/dashboard/company/jobs/[jobId]/page.tsx`<br>→ `./job-detail-client` | Company | Admin → /dashboard; Anonymous → /login; Mentor → /dashboard; Student → /dashboard | 18 | none | M-07, H-13, L-47, H-17 |
+| 17 | `/dashboard/company/jobs/[jobId]/edit` | `src/app/(dashboard)/dashboard/company/jobs/[jobId]/edit/page.tsx`<br>→ `./job-edit-client` | Company | Admin → /dashboard; Anonymous → /login; Mentor → /dashboard; Student → /dashboard | 17 | none | M-07, H-13, L-47, H-17 |
+| 18 | `/dashboard/company/jobs/create` | `src/app/(dashboard)/dashboard/company/jobs/create/page.tsx`<br>→ `./jobs-create-client` | Company | Admin → /dashboard; Anonymous → /login; Mentor → /dashboard; Student → /dashboard | 16 | none | M-07, H-13, L-47, H-17 |
+| 19 | `/dashboard/company/mentors` | `src/app/(dashboard)/dashboard/company/mentors/page.tsx`<br>→ `@/features/company-mentors/components/mentors-page` | Company | Admin → /dashboard; Anonymous → /login; Mentor → /dashboard; Student → /dashboard | 17 | none | — |
+| 20 | `/dashboard/company/profile/edit` | `src/app/(dashboard)/dashboard/company/profile/edit/page.tsx`<br>→ `./profile-edit-client` | Company | Admin → /dashboard; Anonymous → /login; Mentor → /dashboard; Student → /dashboard | 16 | none | M-19 |
+| 21 | `/dashboard/company/tasks` | `src/app/(dashboard)/dashboard/company/tasks/page.tsx`<br>→ `@/features/company-tasks/components/tasks-page` | Company | Admin → /dashboard; Anonymous timeout/goto error; Mentor → /dashboard; Student → /dashboard | 20 | none | L-11 |
+| 22 | `/dashboard/connect-discord` | `src/app/(dashboard)/dashboard/connect-discord/page.tsx`<br>→ `@/components/ui/spinner` | Admin, Student | Anonymous → /login | 4 | none | L-20 |
+| 23 | `/dashboard/courses` | `src/app/(dashboard)/dashboard/courses/page.tsx`<br>→ `./courses-client` | Admin | Anonymous → /login; Student timeout/goto error | 5 | Schema mismatch: /api/v1/integrations/wadhwani/auth-token/ | H-15 |
+| 24 | `/dashboard/district` | `src/app/(dashboard)/dashboard/district/page.tsx` | Admin, District Lead | Anonymous → /login; Student → /dashboard | 14 | API GET /api/v1/dashboard/district/district-details/ → 400 {"general":["You do not have the required role to access this page."]} [Admin]<br>API GET /api/v1/dashboard/district/student-level/ → 400 {"general":["You do not have the required role to access this page."]} [Admin]<br>API GET /api/v1/dashboard/district/top-campus/ → 400 {"general":["You do not have the required role to access this page."]} [Admin]<br>API GET /api/v1/dashboard/district/student-details/ → 400 {"general":["You do not have the required role to access this page."]} [Admin]<br>API GET /api/v1/dashboard/district/college-details/ → 400 {"general":["You do not have the required role to access this page."]} [Admin]<br>API GET /api/v1/dashboard/district/district-details/ → 400 {"general":["No college organization linked to this user."]} [District Lead]<br>API GET /api/v1/dashboard/district/student-level/ → 400 {"general":["No college organization linked to this user."]} [District Lead]<br>API GET /api/v1/dashboard/district/top-campus/ → 400 {"general":["No college organization linked to this user."]} [District Lead]<br>(+2 more) | M-24, M-55 |
+| 25 | `/dashboard/edit-ig` | `src/app/(dashboard)/dashboard/edit-ig/page.tsx`<br>→ `@/features/manage-ig` | Admin | Anonymous → /login; Campus IG Lead → /dashboard; IG Lead timeout/goto error; Student → /dashboard | 9 | none | H-24, H-11, M-37, L-30, M-21 |
+| 26 | `/dashboard/edit-ig/[id]` | `src/app/(dashboard)/dashboard/edit-ig/[id]/page.tsx`<br>→ `@/features/manage-ig` | Admin, IG Lead | Anonymous → /login; Campus IG Lead → /dashboard; Student → /dashboard | 13 | none | H-24, H-11, M-37, L-30, M-21 |
+| 27 | `/dashboard/events` | `src/app/(dashboard)/dashboard/events/page.tsx`<br>→ `./events-client` | Admin, Student | Anonymous → /login | 7 | none | M-11, H-34 |
+| 28 | `/dashboard/events/[id]` | `src/app/(dashboard)/dashboard/events/[id]/page.tsx`<br>→ `@/features/events` | Admin, Student | Anonymous → /login | 5 | none | M-11, H-34 |
+| 29 | `/dashboard/interest-groups` | `src/app/(dashboard)/dashboard/interest-groups/page.tsx`<br>→ `@/features/interest-groups` | Admin, IG Lead, Student | Anonymous → /login | 5 | none | M-08, M-09, L-31, M-21, H-34 |
+| 30 | `/dashboard/interest-groups/[id]` | `src/app/(dashboard)/dashboard/interest-groups/[id]/page.tsx`<br>→ `@/features/interest-groups` | Admin, IG Lead, Student | Anonymous → /login | 5 | none | M-08, M-09, L-31, M-21, H-34 |
+| 31 | `/dashboard/intern` | `src/app/(dashboard)/dashboard/intern/page.tsx`<br>→ `./intern-client` | Admin, Intern, Intern Lead | Anonymous → /login; Student → /dashboard | 15 | API GET /api/v1/dashboard/intern/overview/status/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead]<br>API GET /api/v1/dashboard/intern/leaderboard/me/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead]<br>API GET /api/v1/dashboard/intern/timesheets/history/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead]<br>API GET /api/v1/dashboard/intern/overview/leaderboard/top/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead]<br>API GET /api/v1/dashboard/intern/tasks/mine/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead]<br>API GET /api/v1/dashboard/intern/reviews/history/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead]<br>API GET /api/v1/dashboard/intern/leaderboard/me/ → 400 {"general":["Not found in leaderboard."]} [Intern]<br>API GET /api/v1/dashboard/intern/overview/status/ → 400 {"general":["Not an intern."]} [Intern] | M-54 |
+| 32 | `/dashboard/intern/leaderboard` | `src/app/(dashboard)/dashboard/intern/leaderboard/page.tsx`<br>→ `./intern-leaderboard-client` | Admin, Intern, Intern Lead | Anonymous → /login; Student → /dashboard | 11 | API GET /api/v1/dashboard/intern/leaderboard/me/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead]<br>API GET /api/v1/dashboard/intern/leaderboard/me/ → 400 {"general":["Not found in leaderboard."]} [Intern]<br>API GET /api/v1/dashboard/intern/leaderboard/ → 400 {"general":["You do not have the required role to access this page."]} [Intern Lead] | M-54 |
+| 33 | `/dashboard/intern/leave` | `src/app/(dashboard)/dashboard/intern/leave/page.tsx`<br>→ `./intern-leave-client` | Admin, Intern, Intern Lead | Anonymous → /login; Student → /dashboard | 11 | API GET /api/v1/dashboard/intern/leave/balance/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead]<br>API GET /api/v1/dashboard/intern/leave/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead] | M-54 |
+| 34 | `/dashboard/intern/minutes` | `src/app/(dashboard)/dashboard/intern/minutes/page.tsx`<br>→ `@/components/ui/badge` | Admin, Intern, Intern Lead | Anonymous → /login; Student → /dashboard | 10 | API GET /api/v1/dashboard/intern/overview/status/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead]<br>API GET /api/v1/dashboard/intern/overview/status/ → 400 {"general":["Not an intern."]} [Intern] | M-54 |
+| 35 | `/dashboard/intern/quest-log` | `src/app/(dashboard)/dashboard/intern/quest-log/page.tsx`<br>→ `@/features/intern` | Admin, Intern, Intern Lead | Anonymous → /login; Student → /dashboard | 12 | API GET /api/v1/dashboard/intern/timesheets/history/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead]<br>API GET /api/v1/dashboard/intern/reviews/history/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead]<br>API GET /api/v1/dashboard/intern/tasks/mine/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead] | M-54 |
+| 36 | `/dashboard/intern/tasks` | `src/app/(dashboard)/dashboard/intern/tasks/page.tsx`<br>→ `./intern-task-client` | Admin, Intern, Intern Lead | Anonymous → /login; Student → /dashboard | 10 | API GET /api/v1/dashboard/intern/tasks/mine/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead] | M-54, L-45 |
+| 37 | `/dashboard/intern/timesheet` | `src/app/(dashboard)/dashboard/intern/timesheet/page.tsx`<br>→ `./intern-timesheet-client` | Admin, Intern, Intern Lead | Anonymous → /login; Student → /dashboard | 14 | API GET /api/v1/dashboard/intern/timesheets/history/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead]<br>API GET /api/v1/dashboard/intern/overview/status/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead]<br>API GET /api/v1/dashboard/intern/timesheets/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead]<br>API GET /api/v1/dashboard/intern/timesheets/today/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead]<br>API GET /api/v1/dashboard/intern/tasks/mine/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead]<br>API GET /api/v1/dashboard/intern/timesheets/today/ → 400 {"general":["No timesheet submitted for today."]} [Intern]<br>API GET /api/v1/dashboard/intern/overview/status/ → 400 {"general":["Not an intern."]} [Intern] | M-54 |
+| 38 | `/dashboard/intern/weekly-review` | `src/app/(dashboard)/dashboard/intern/weekly-review/page.tsx`<br>→ `./weekly-review-client` | Admin, Intern, Intern Lead | Anonymous → /login; Student → /dashboard | 11 | API GET /api/v1/dashboard/intern/overview/status/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead]<br>API GET /api/v1/dashboard/intern/reviews/current/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Intern Lead]<br>API GET /api/v1/dashboard/intern/overview/status/ → 400 {"general":["Not an intern."]} [Intern]<br>API GET /api/v1/dashboard/intern/reviews/current/ → 400 {"general":["No review submitted for the current week."]} [Intern] | M-54 |
+| 39 | `/dashboard/jobs` | `src/app/(dashboard)/dashboard/jobs/page.tsx`<br>→ `./jobs-page-client` | Admin, Student | Anonymous → /login; Company → /dashboard; Mentor → /dashboard | 17 | none | L-47 |
+| 40 | `/dashboard/leaderboard` | `src/app/(dashboard)/dashboard/leaderboard/page.tsx`<br>→ `@/features/leaderboard` | Admin, Student | Anonymous → /login | 5 | none | H-35 |
+| 41 | `/dashboard/learning-circle` | `src/app/(dashboard)/dashboard/learning-circle/page.tsx`<br>→ `@/components/ui/page-header` | Admin, Student | Anonymous → /login | 8 | none | H-10, M-42, L-33 |
+| 42 | `/dashboard/learning-circle/[id]` | `src/app/(dashboard)/dashboard/learning-circle/[id]/page.tsx`<br>→ `@/features/learning-circle` | Admin, Student | Anonymous → /login | 10 | none | H-10, M-43, M-20, L-32, H-35 |
+| 43 | `/dashboard/learning-circle/[id]/meeting/[meet_id]` | `src/app/(dashboard)/dashboard/learning-circle/[id]/meeting/[meet_id]/page.tsx`<br>→ `@/features/learning-circle` | Student | Admin timeout/goto error; Anonymous → /login | 8 | none | H-10, L-34 |
+| 44 | `/dashboard/learning-circle/invite/[link_id]` | `src/app/(dashboard)/dashboard/learning-circle/invite/[link_id]/page.tsx`<br>→ `@/features/learning-circle` | Admin, Student | Anonymous → /login | 5 | API GET /api/v1/dashboard/learningcircle/invite/status/<id>/ → 500  [Admin,Student] | H-27 |
+| 45 | `/dashboard/learning-circle/invites` | `src/app/(dashboard)/dashboard/learning-circle/invites/page.tsx`<br>→ `@/features/learning-circle` | Admin, Student | Anonymous → /login | 6 | none | L-32 |
+| 46 | `/dashboard/manage-events` | `src/app/(dashboard)/dashboard/manage-events/page.tsx`<br>→ `@/features/events` | Admin, Campus Lead, Company, Enabler, IG Lead, Mentor | Anonymous → /login; Campus IG Lead → /dashboard; Student → /dashboard | 18 | Schema mismatch: /api/v1/dashboard/events/meta/categories/ | H-09, M-10, H-25 |
+| 47 | `/dashboard/manage-events/[id]` | `src/app/(dashboard)/dashboard/manage-events/[id]/page.tsx`<br>→ `@/features/events` | Admin, Campus Lead, Company, Enabler, IG Lead, Mentor | Anonymous → /login; Campus IG Lead → /dashboard; Student → /dashboard | 13 | API GET /api/v1/dashboard/events/manage/<id>/ → 400 {"general":["You do not have permission to manage this event."]} [Campus Lead,Company,IG Lead,Mentor] | H-09, M-10, H-25 |
+| 48 | `/dashboard/management` | `src/app/(dashboard)/dashboard/management/page.tsx` | Admin, Associate, Discord Mod, Fellow, Tech Team | Anonymous → /login; Comic Admin → /dashboard; Student → /dashboard | 9 | none | — |
+| 49 | `/dashboard/management/channels` | `src/app/(dashboard)/dashboard/management/channels/page.tsx`<br>→ `@/features/channels/components/channel-page` | Admin, Associate, Fellow | Anonymous → /login; Comic Admin → /dashboard; Discord Mod → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | Schema mismatch: /api/v1/dashboard/channels/?pageIndex=1&perPage=10 | L-11 |
+| 50 | `/dashboard/management/college-levels` | `src/app/(dashboard)/dashboard/management/college-levels/page.tsx`<br>→ `@/features/college-levels/components/CollegeLevelsPage` | Admin, Fellow | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | none | — |
+| 51 | `/dashboard/management/community` | `src/app/(dashboard)/dashboard/management/community/page.tsx` | Admin, Associate, Discord Mod, Fellow | Anonymous → /login; Comic Admin → /dashboard; Student → /dashboard; Tech Team → /dashboard | 9 | none | — |
+| 52 | `/dashboard/management/discord-moderation` | `src/app/(dashboard)/dashboard/management/discord-moderation/page.tsx`<br>→ `@/features/discord-moderation` | Admin, Discord Mod | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | API GET /api/v1/dashboard/discord-moderator/leaderboard/ → 500  [Admin,Discord Mod] | H-26, M-46 |
+| 53 | `/dashboard/management/dynamic-type` | `src/app/(dashboard)/dashboard/management/dynamic-type/page.tsx`<br>→ `@/features/dynamic-type` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | API GET /api/v1/dashboard/dynamic-management/dynamic-role/ → 500  [Admin] | H-26 |
+| 54 | `/dashboard/management/error-log` | `src/app/(dashboard)/dashboard/management/error-log/page.tsx`<br>→ `@/features/error-log` | Admin, Tech Team | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard | 10 | none | L-01, L-43 |
+| 55 | `/dashboard/management/homepage` | `src/app/(dashboard)/dashboard/management/homepage/page.tsx` | Associate, Fellow | Admin timeout/goto error; Anonymous → /login; Comic Admin → /dashboard; Discord Mod → /dashboard; Student → /dashboard; Tech Team → /dashboard | 9 | none | — |
+| 56 | `/dashboard/management/homepage/career-labs` | `src/app/(dashboard)/dashboard/management/homepage/career-labs/page.tsx`<br>→ `@/features/career-labs` | Admin, Associate, Fellow | Anonymous → /login; Comic Admin → /dashboard; Discord Mod → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | API GET /api/v1/dashboard/career-lab/hiring/ → 400 {"general":["You do not have the required role to access this page."]} [Fellow] | M-56 |
+| 57 | `/dashboard/management/karma-voucher` | `src/app/(dashboard)/dashboard/management/karma-voucher/page.tsx`<br>→ `@/features/karma-voucher` | Admin, Fellow | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | none | — |
+| 58 | `/dashboard/management/manage-achievements` | `src/app/(dashboard)/dashboard/management/manage-achievements/page.tsx`<br>→ `@/features/achievements` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 9 | none | C-02 |
+| 59 | `/dashboard/management/manage-achievements/bulk-issue` | `src/app/(dashboard)/dashboard/management/manage-achievements/bulk-issue/page.tsx`<br>→ `@/features/achievements` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | none | C-02 |
+| 60 | `/dashboard/management/manage-achievements/issue` | `src/app/(dashboard)/dashboard/management/manage-achievements/issue/page.tsx`<br>→ `@/features/achievements` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 9 | none | C-02 |
+| 61 | `/dashboard/management/manage-achievements/list` | `src/app/(dashboard)/dashboard/management/manage-achievements/list/page.tsx`<br>→ `@/features/achievements` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 11 | none | C-02 |
+| 62 | `/dashboard/management/manage-achievements/logs` | `src/app/(dashboard)/dashboard/management/manage-achievements/logs/page.tsx`<br>→ `@/components/ui/tabs` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | none | C-02 |
+| 63 | `/dashboard/management/manage-achievements/rules` | `src/app/(dashboard)/dashboard/management/manage-achievements/rules/page.tsx`<br>→ `@/features/achievements` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 11 | none | C-02 |
+| 64 | `/dashboard/management/manage-achievements/simulate` | `src/app/(dashboard)/dashboard/management/manage-achievements/simulate/page.tsx`<br>→ `@/features/achievements` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 9 | none | C-02 |
+| 65 | `/dashboard/management/manage-companies` | `src/app/(dashboard)/dashboard/management/manage-companies/page.tsx`<br>→ `@/features/role-verification` | — | Admin → /dashboard/management/role-verification; Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team →  | 10 | none | — |
+| 66 | `/dashboard/management/manage-interest-groups` | `src/app/(dashboard)/dashboard/management/manage-interest-groups/page.tsx`<br>→ `./manage-interest-groups-client` | Admin, Fellow | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Student → /dashboard; Tech Team → /dashboard | 11 | none | H-11, M-08, M-37 |
+| 67 | `/dashboard/management/manage-interns` | `src/app/(dashboard)/dashboard/management/manage-interns/page.tsx`<br>→ `./manage-interns-client` | Admin, Associate, Intern Lead | Anonymous → /login; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Intern → /dashboard; Student → /dashboard; Tech Team → /dashboard | 12 | API GET /api/v1/dashboard/intern/guilds/ → 400 {"general":["You do not have the required role to access this page."]} [Associate,Intern Lead]<br>API GET /api/v1/dashboard/manage-interns/interns/ → 400 {"general":["You do not have the required role to access this page."]} [Associate]<br>API GET /api/v1/dashboard/manage-interns/status/ → 400 {"general":["You do not have the required role to access this page."]} [Associate] | C-10, H-21, M-38, M-54 |
+| 68 | `/dashboard/management/manage-interns/intern-report` | `src/app/(dashboard)/dashboard/management/manage-interns/intern-report/page.tsx`<br>→ `./intern-report-client` | Admin, Associate, Intern Lead | Anonymous → /login; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Intern → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | API GET /api/v1/dashboard/manage-interns/reviews/ → 400 {"general":["You do not have the required role to access this page."]} [Associate] | C-10, H-21, M-38, M-54 |
+| 69 | `/dashboard/management/manage-interns/intern-report/individual` | `src/app/(dashboard)/dashboard/management/manage-interns/intern-report/individual/page.tsx`<br>→ `./individual-report-client` | Admin, Associate, Intern Lead | Anonymous → /login; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Intern → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | API GET /api/v1/dashboard/manage-interns/reviews/ → 400 {"general":["You do not have the required role to access this page."]} [Associate] | C-10, H-21, M-38, M-54 |
+| 70 | `/dashboard/management/manage-interns/intern-report/team` | `src/app/(dashboard)/dashboard/management/manage-interns/intern-report/team/page.tsx`<br>→ `./team-report-client` | Admin, Associate, Intern Lead | Anonymous → /login; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Intern → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | API GET /api/v1/dashboard/manage-interns/reviews/ → 400 {"general":["You do not have the required role to access this page."]} [Associate] | C-10, H-21, M-38, M-54 |
+| 71 | `/dashboard/management/manage-interns/leave-reviews` | `src/app/(dashboard)/dashboard/management/manage-interns/leave-reviews/page.tsx`<br>→ `./leave-reviews-client` | Admin, Associate, Intern Lead | Anonymous → /login; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Intern → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | API GET /api/v1/dashboard/manage-interns/leave/ → 400 {"general":["You do not have the required role to access this page."]} [Associate] | C-10, H-21, M-38, M-54 |
+| 72 | `/dashboard/management/manage-interns/minutes` | `src/app/(dashboard)/dashboard/management/manage-interns/minutes/page.tsx`<br>→ `./manage-minutes-client` | Admin, Associate, Intern Lead | Anonymous → /login; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Intern → /dashboard; Student → /dashboard; Tech Team → /dashboard | 12 | API GET /api/v1/dashboard/intern/overview/status/ → 400 {"general":["You do not have the required role to access this page."]} [Admin,Associate,Intern Lead]<br>API GET /api/v1/dashboard/intern/guilds/ → 400 {"general":["You do not have the required role to access this page."]} [Associate,Intern Lead]<br>API GET /api/v1/dashboard/intern/minutes/ → 400 {"general":["You do not have the required role to access this page."]} [Associate] | C-10, H-21, M-38, M-54 |
+| 73 | `/dashboard/management/manage-interns/tasks` | `src/app/(dashboard)/dashboard/management/manage-interns/tasks/page.tsx`<br>→ `./admin-tasks-client` | Admin, Associate, Intern Lead | Anonymous → /login; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Intern → /dashboard; Student → /dashboard; Tech Team → /dashboard | 13 | API GET /api/v1/dashboard/manage-interns/interns/ → 400 {"general":["You do not have the required role to access this page."]} [Associate]<br>API GET /api/v1/dashboard/intern/guilds/ → 400 {"general":["You do not have the required role to access this page."]} [Associate,Intern Lead]<br>API GET /api/v1/dashboard/manage-interns/tasks/ → 400 {"general":["You do not have the required role to access this page."]} [Associate]<br>API GET /api/v1/dashboard/intern/tasks/categories/ → 400 {"general":["You do not have the required role to access this page."]} [Associate,Intern Lead] | C-10, H-21, M-38, M-54 |
+| 74 | `/dashboard/management/manage-interns/timesheet-reviews` | `src/app/(dashboard)/dashboard/management/manage-interns/timesheet-reviews/page.tsx`<br>→ `./timesheet-reviews-client` | Admin, Associate, Intern Lead | Anonymous → /login; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Intern → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | API GET /api/v1/dashboard/manage-interns/reviews/timesheets/ → 400 {"general":["You do not have the required role to access this page."]} [Associate] | C-10, H-21, M-38, M-54 |
+| 75 | `/dashboard/management/manage-locations` | `src/app/(dashboard)/dashboard/management/manage-locations/page.tsx`<br>→ `@/features/manage-locations` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | none | L-11 |
+| 76 | `/dashboard/management/manage-roles` | `src/app/(dashboard)/dashboard/management/manage-roles/page.tsx`<br>→ `@/features/manage-roles/components/roles-table` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | none | M-01, M-02, M-03, M-04, M-36, L-29 |
+| 77 | `/dashboard/management/manage-users` | `src/app/(dashboard)/dashboard/management/manage-users/page.tsx`<br>→ `@/features/manage-users/components/manage-user-page` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | none | M-33, M-35, L-21 |
+| 78 | `/dashboard/management/mentor-verification` | `src/app/(dashboard)/dashboard/management/mentor-verification/page.tsx`<br>→ `@/features/role-verification` | — | Admin → /dashboard/management/role-verification; Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team →  | 12 | none | H-24 |
+| 79 | `/dashboard/management/notifications` | `src/app/(dashboard)/dashboard/management/notifications/page.tsx`<br>→ `@/features/notification/components/manage/notification-manage-card` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | none | H-04, H-05, M-12 |
+| 80 | `/dashboard/management/organizations` | `src/app/(dashboard)/dashboard/management/organizations/page.tsx`<br>→ `@/features/role-verification` | Admin, Associate, Fellow | Anonymous → /login; Comic Admin → /dashboard; Discord Mod → /dashboard; Student → /dashboard; Tech Team → /dashboard | 9 | none | M-05 |
+| 81 | `/dashboard/management/organizations/affiliation` | `src/app/(dashboard)/dashboard/management/organizations/affiliation/page.tsx`<br>→ `@/features/organizations` | Admin, Associate, Fellow | Anonymous → /login; Comic Admin → /dashboard; Discord Mod → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | none | — |
+| 82 | `/dashboard/management/organizations/departments` | `src/app/(dashboard)/dashboard/management/organizations/departments/page.tsx`<br>→ `@/features/organizations` | Admin, Fellow | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | API GET /api/v1/dashboard/organisation/departments/ → 400 {"general":["You do not have the required role to access this page."]} [Fellow] | M-56 |
+| 83 | `/dashboard/management/organizations/list` | `src/app/(dashboard)/dashboard/management/organizations/list/page.tsx`<br>→ `@/features/organizations` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | none | M-05, L-38, L-14, H-35 |
+| 84 | `/dashboard/management/organizations/transfer` | `src/app/(dashboard)/dashboard/management/organizations/transfer/page.tsx`<br>→ `@/features/organizations` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 9 | none | C-01, H-03, M-06 |
+| 85 | `/dashboard/management/organizations/verify` | `src/app/(dashboard)/dashboard/management/organizations/verify/page.tsx`<br>→ `@/features/role-verification` | — | Admin → /dashboard/management/role-verification; Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team →  | 10 | none | H-01, H-02, M-05 |
+| 86 | `/dashboard/management/role-verification` | `src/app/(dashboard)/dashboard/management/role-verification/page.tsx`<br>→ `./role-verification-client` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 12 | none | H-07, L-12, L-22 |
+| 87 | `/dashboard/management/session-verification` | `src/app/(dashboard)/dashboard/management/session-verification/page.tsx`<br>→ `@/features/mentor/sessions/components/admin-session-verification-page` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | none | H-06 |
+| 88 | `/dashboard/management/system` | `src/app/(dashboard)/dashboard/management/system/page.tsx` | Admin, Associate, Fellow, Tech Team | Anonymous → /login; Comic Admin → /dashboard; Discord Mod → /dashboard; Student → /dashboard | 9 | none | — |
+| 89 | `/dashboard/management/system/features` | `src/app/(dashboard)/dashboard/management/system/features/page.tsx`<br>→ `@/features/grit-meter/components/grit-meter-item` | Admin, Associate, Fellow | Anonymous → /login; Comic Admin → /dashboard; Discord Mod → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | none | — |
+| 90 | `/dashboard/management/tasks` | `src/app/(dashboard)/dashboard/management/tasks/page.tsx` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 9 | none | M-39, L-11 |
+| 91 | `/dashboard/management/tasks/bulk-import` | `src/app/(dashboard)/dashboard/management/tasks/bulk-import/page.tsx`<br>→ `@/features/tasks` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 9 | none | M-39, L-11 |
+| 92 | `/dashboard/management/tasks/create` | `src/app/(dashboard)/dashboard/management/tasks/create/page.tsx`<br>→ `@/features/tasks` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 16 | none | M-39, L-11 |
+| 93 | `/dashboard/management/tasks/list` | `src/app/(dashboard)/dashboard/management/tasks/list/page.tsx`<br>→ `@/features/tasks` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | none | M-39, L-11 |
+| 94 | `/dashboard/management/tasks/task-type` | `src/app/(dashboard)/dashboard/management/tasks/task-type/page.tsx`<br>→ `@/features/tasks` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | none | M-39, L-11 |
+| 95 | `/dashboard/management/tasks/task-verification` | `src/app/(dashboard)/dashboard/management/tasks/task-verification/page.tsx`<br>→ `@/features/tasks` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | none | M-39, L-11 |
+| 96 | `/dashboard/management/user-management` | `src/app/(dashboard)/dashboard/management/user-management/page.tsx`<br>→ `@/features/role-verification` | Admin, Associate | Anonymous → /login; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard/management; Student → /dashboard; Tech Team → /dashboard | 9 | none | — |
+| 97 | `/dashboard/management/verification` | `src/app/(dashboard)/dashboard/management/verification/page.tsx` | Admin | Anonymous → /login; Associate → /dashboard; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 9 | none | H-07 |
+| 98 | `/dashboard/management/weekly-twitches` | `src/app/(dashboard)/dashboard/management/weekly-twitches/page.tsx`<br>→ `@/features/weekly-twitches` | Admin, Associate | Anonymous → /login; Comic Admin → /dashboard; Discord Mod → /dashboard; Fellow → /dashboard; Student → /dashboard; Tech Team → /dashboard | 10 | none | L-49, M-21 |
+| 99 | `/dashboard/mentor` | `src/app/(dashboard)/dashboard/mentor/page.tsx` | — | Admin → /dashboard; Anonymous → /login; Mentor → /dashboard; Student → /dashboard | 14 | none | H-06, H-13 |
+| 100 | `/dashboard/mentor/mentees` | `src/app/(dashboard)/dashboard/mentor/mentees/page.tsx`<br>→ `@/features/mentor/mentees/components/mentees-page` | Mentor | Admin → /dashboard; Anonymous → /login; Student → /dashboard | 11 | none | H-06, H-13 |
+| 101 | `/dashboard/mentor/opportunities` | `src/app/(dashboard)/dashboard/mentor/opportunities/page.tsx` | — | Admin → /dashboard; Anonymous → /login; Mentor → /dashboard; Student → /dashboard | 14 | none | H-06, H-13 |
+| 102 | `/dashboard/mentor/sessions` | `src/app/(dashboard)/dashboard/mentor/sessions/page.tsx`<br>→ `@/features/mentor/sessions/components/sessions-page` | Mentor | Admin → /dashboard; Anonymous → /login; Student → /dashboard | 12 | none | H-06, H-13 |
+| 103 | `/dashboard/mentor/task-requests` | `src/app/(dashboard)/dashboard/mentor/task-requests/page.tsx`<br>→ `@/features/mentor/task-requests/components/task-requests-page` | Mentor | Admin → /dashboard; Anonymous → /login; Student → /dashboard | 14 | none | H-06, H-13 |
+| 104 | `/dashboard/mujourney` | `src/app/(dashboard)/dashboard/mujourney/page.tsx` | Admin, Student | Anonymous → /login | 5 | none | M-29, H-34 |
+| 105 | `/dashboard/mujourney/[muid]` | `src/app/(dashboard)/dashboard/mujourney/[muid]/page.tsx`<br>→ `./mujourney-client` | Admin, Student | Anonymous → /login | 5 | none | M-29, H-34 |
+| 106 | `/dashboard/muverse` | `src/app/(dashboard)/dashboard/muverse/page.tsx`<br>→ `./muverse-client` | Admin, Comic Admin, Student | Anonymous → /login | 4 | none | — |
+| 107 | `/dashboard/profile` | `src/app/(dashboard)/dashboard/profile/page.tsx`<br>→ `./profile-client` | Admin, Associate, Campus IG Lead, Campus Lead, Comic Admin, Company, Discord Mod, District Lead, Enabler, Fellow, IG Lead, Intern, Intern Lead, Lead Enabler, Mentor, Student, Tech Team, Zonal Lead | Anonymous → /login | 19 | none | C-03, M-30, M-31, H-23, L-23 |
+| 108 | `/dashboard/projects` | `src/app/(dashboard)/dashboard/projects/page.tsx`<br>→ `@/features/projects` | Admin, Student | Anonymous → /login | 5 | none | L-40, L-12 |
+| 109 | `/dashboard/reports` | `src/app/(dashboard)/dashboard/reports/page.tsx`<br>→ `./event-report-client` | Admin, Student | Anonymous → /login | 4 | none | — |
+| 110 | `/dashboard/search` | `src/app/(dashboard)/dashboard/search/page.tsx` | — | Admin → /dashboard/search/students; Anonymous → /login; Student → /dashboard/search/students | 5 | JS error: Error: Minified React error #310; visit https://react.dev/errors/310 for the full message or use the non-minified dev environment for full errors and additional | M-15, L-48, H-34, H-35 |
+| 111 | `/dashboard/search/campuses` | `src/app/(dashboard)/dashboard/search/campuses/page.tsx`<br>→ `@/features/search` | Admin, Student | Anonymous → /login | 6 | none | M-15, L-48, H-34, H-35 |
+| 112 | `/dashboard/search/mentors` | `src/app/(dashboard)/dashboard/search/mentors/page.tsx`<br>→ `@/features/search` | Admin, Student | Anonymous → /login | 5 | API GET /api/v1/notification/unread-count/ → 403  [Anonymous] | M-15, L-48, H-34, H-35 |
+| 113 | `/dashboard/search/students` | `src/app/(dashboard)/dashboard/search/students/page.tsx`<br>→ `@/features/search` | Admin, Student | Anonymous → /login | 5 | none | M-15, L-48, H-34, H-35 |
+| 114 | `/dashboard/sessions` | `src/app/(dashboard)/dashboard/sessions/page.tsx`<br>→ `@/features/mentor/sessions/components/student-sessions-page` | Admin, Mentor, Student | Anonymous → /login | 7 | none | — |
+| 115 | `/dashboard/settings` | `src/app/(dashboard)/dashboard/settings/page.tsx`<br>→ `@/components/auth/role-gate` | Admin, Student | Anonymous → /login | 4 | none | — |
+| 116 | `/dashboard/settings/account` | `src/app/(dashboard)/dashboard/settings/account/page.tsx`<br>→ `./change-password-form` | Admin, Student | Anonymous → /login | 4 | none | M-31, L-26 |
+| 117 | `/dashboard/settings/organization` | `src/app/(dashboard)/dashboard/settings/organization/page.tsx`<br>→ `./organization-settings-client` | Admin, Campus Lead, Enabler, Lead Enabler, Student | Anonymous → /login | 6 | none | H-23 |
+| 118 | `/dashboard/talent-pool` | `src/app/(dashboard)/dashboard/talent-pool/page.tsx`<br>→ `./talent-pool-client` | Admin, Company, Student | Anonymous → /login | 10 | API GET /api/v1/dashboard/company/mulearners/ → 400 {"general":["Access denied. Verified company profile required."]} [Admin,Student]<br>API GET /api/v1/dashboard/company/mulearners/shortlist/ → 400 {"general":["Access denied. Verified company profile required."]} [Admin,Student]<br>Schema mismatch: /api/v1/dashboard/achievement/list/ | M-57, L-41 |
+| 119 | `/dashboard/url-shortener` | `src/app/(dashboard)/dashboard/url-shortener/page.tsx`<br>→ `@/features/url-shortener/components/url-shortener-view` | Admin, Associate, Fellow | Anonymous → /login; Student → /dashboard | 10 | none | L-50 |
+| 120 | `/dashboard/url-shortener/[id]/analytics` | `src/app/(dashboard)/dashboard/url-shortener/[id]/analytics/page.tsx`<br>→ `@/features/url-shortener` | Admin, Associate, Fellow | Anonymous → /login; Student → /dashboard | 10 | none | L-50 |
+| 121 | `/dashboard/weekly-twitches` | `src/app/(dashboard)/dashboard/weekly-twitches/page.tsx`<br>→ `@/features/weekly-twitches` | Admin, Student | Anonymous → /login | 5 | none | L-49 |
+| 122 | `/dashboard/zonal` | `src/app/(dashboard)/dashboard/zonal/page.tsx` | Admin, Zonal Lead | Anonymous → /login; Student → /dashboard | 14 | API GET /api/v1/dashboard/zonal/top-districts/ → 400 {"general":["You do not have the required role to access this page."]} [Admin]<br>API GET /api/v1/dashboard/zonal/student-level/ → 400 {"general":["You do not have the required role to access this page."]} [Admin]<br>API GET /api/v1/dashboard/zonal/student-details/ → 400 {"general":["You do not have the required role to access this page."]} [Admin]<br>API GET /api/v1/dashboard/zonal/zonal-details/ → 400 {"general":["You do not have the required role to access this page."]} [Admin]<br>API GET /api/v1/dashboard/zonal/college-details/ → 400 {"general":["You do not have the required role to access this page."]} [Admin]<br>API GET /api/v1/dashboard/zonal/top-districts/ → 400 {"general":["No college organization linked to this user."]} [Zonal Lead]<br>API GET /api/v1/dashboard/zonal/student-details/ → 400 {"general":["No college organization linked to this user."]} [Zonal Lead]<br>API GET /api/v1/dashboard/zonal/student-level/ → 400 {"general":["No college organization linked to this user."]} [Zonal Lead]<br>(+2 more) | M-24, M-55 |
+| 123 | `/forgot-password` | `src/app/(auth)/forgot-password/page.tsx`<br>→ `./forgot-password-client` | Anonymous | Admin → /dashboard; Student → /dashboard | 9 | none | M-34, L-17 |
+| 124 | `/login` | `src/app/(auth)/login/page.tsx`<br>→ `./login-client` | Anonymous | Admin → /dashboard; Student → /dashboard | 9 | none | H-18, H-19, H-20, M-23, M-25, M-26 |
+| 125 | `/onboarding/interests` | `src/app/(onboarding)/onboarding/interests/page.tsx`<br>→ `./interests-client` | — | Admin → /dashboard/management; Anonymous → /login; Student → /dashboard | 9 | none | L-18 |
+| 126 | `/onboarding/organization` | `src/app/(onboarding)/onboarding/organization/page.tsx`<br>→ `./organization-client` | Admin, Student | Anonymous → /login | 3 | none | H-23 |
+| 127 | `/profile/[muid]` | `src/app/(dashboard)/profile/[muid]/page.tsx`<br>→ `./publicprofile-client` | Admin, Student | Anonymous → /login | 12 | none | L-23, M-15, H-34 |
+| 128 | `/register` | `src/app/(auth)/register/page.tsx`<br>→ `./register-client` | Anonymous | Admin → /dashboard; Student → /dashboard | 13 | none | C-09, C-05, M-52, L-15, L-16, M-19 |
+| 129 | `/reset-password` | `src/app/(auth)/reset-password/page.tsx`<br>→ `./reset-password-client` | Anonymous | Admin → /dashboard; Student → /dashboard | 9 | none | M-34, L-17 |
+
+## Appendix G — Every HTTP 500 seen in the dynamic test (except signature mismatches)
+
+| Location | Exception | Endpoints | Roles that hit it | Issues |
+|---|---|---|---|---|
+| `api/common/common_views.py:110` | ImproperlyConfigured: Field name `name` is not valid for model `LearningCircle`. | GET `/api/v1/public/lc-list` | 19 roles | H-28 |
+| `api/common/common_views.py:204` | FieldError: Cannot resolve keyword 'name' into field. Choices are: cached_rank, cached_total_karma, circle_meeting_log_circle_id, created_at | GET `/api/v1/public/lc-dashboard/` | 19 roles | H-28 |
+| `api/common/common_views.py:309` | FieldError: Cannot resolve keyword 'name' into field. Choices are: cached_rank, cached_total_karma, circle_meeting_log_circle_id, created_at | GET `/api/v1/public/lc-report/` | 19 roles | H-28 |
+| `api/common/common_views.py:369` | FieldError: Cannot resolve keyword 'name' into field. Choices are: cached_rank, cached_total_karma, circle_meeting_log_circle_id, created_at | GET `/api/v1/public/lc-report/csv/` | 19 roles | H-28 |
+| `api/common/common_views.py:503` | FieldError: Cannot resolve keyword 'name' into field. Choices are: cached_rank, cached_total_karma, circle_meeting_log_circle_id, created_at | GET `/api/v1/public/lc-enrollment/` | 19 roles | H-28 |
+| `api/common/common_views.py:555` | FieldError: Cannot resolve keyword 'name' into field. Choices are: cached_rank, cached_total_karma, circle_meeting_log_circle_id, created_at | GET `/api/v1/public/lc-enrollment/csv/` | 19 roles | H-28 |
+| `api/common/common_views.py:57` | ImproperlyConfigured: Field name `name` is not valid for model `LearningCircle`. | GET `/api/v1/public/<str:circle_id>/lc-details/` | 19 roles | H-28 |
+| `api/common/common_views.py:698` | TypeError: int() argument must be a string, a bytes-like object or a real number, not 'dict' | GET `/api/v1/public/gta-sandshore/` | 19 roles | M-51 (crash here was caused by the mocked reply; the real risks are listed in M-51) |
+| `api/dashboard/campus/campus_views.py:503` | NotImplementedError: `create()` must be implemented. | PATCH `/api/v1/dashboard/campus/change-student-type/<str:member_id>/` | campuslead, leadenabler | L-12 |
+| `api/dashboard/campus/campus_views.py:794` | ValueError: The annotation 'full_name' conflicts with a field on the model. | GET `/api/v1/dashboard/campus/student-list/` | campuslead, enabler, leadenabler, mentor | M-47 |
+| `api/dashboard/campus/serializers.py:858` | AttributeError: 'UserLvlLink' object has no attribute 'first' | GET `/api/v1/dashboard/campus/learning-circles/<str:circle_id>/members/` | campuslead, enabler, leadenabler, mentor | M-47 |
+| `api/dashboard/campus/serializers.py:885` | AttributeError: 'UserLvlLink' object has no attribute 'first' | GET `/api/v1/dashboard/campus/igs/<str:ig_id>/members/` | campuslead, enabler, leadenabler, mentor | M-47 |
+| `api/dashboard/discord_moderator/discord_mod_views.py:37` | AttributeError: Got AttributeError when attempting to get a value for field `full_name` on serializer `KarmaActivityLogSerializer`. | GET `/api/v1/dashboard/discord-moderator/tasklist/` | 18 roles | M-46 |
+| `api/dashboard/error_log/log_helper.py:291` | IndexError: list index out of range | GET `/api/v1/dashboard/error-log/graph/` | fellow, techteam | L-13 |
+| `api/dashboard/karma_voucher/karma_voucher_view.py:416` | FileNotFoundError: [Errno 2] No such file or directory: './excel-templates/voucher_base_template.xlsx' | GET `/api/v1/dashboard/karma-voucher/base-template/` | 18 roles | test artefact — not a bug (template path depends on the working directory / generated dates / mocked partner reply) |
+| `api/dashboard/learningcircle/learningcircle_serializer.py:27` | OverflowError: date value out of range | GET `/api/v1/dashboard/learningcircle/meeting/list-public/`<br>GET `/api/v1/dashboard/learningcircle/meeting/list/` | 19 roles | test artefact — not a bug (template path depends on the working directory / generated dates / mocked partner reply) |
+| `api/dashboard/organisation/organisation_views.py:650` | FileNotFoundError: [Errno 2] No such file or directory: './excel-templates/organisation_base_template.xlsx' | GET `/api/v1/dashboard/organisation/base-template/` | 18 roles | test artefact — not a bug (template path depends on the working directory / generated dates / mocked partner reply) |
+| `api/dashboard/profile/profile_view.py:941` | AttributeError: module 'api.dashboard.profile.profile_serializer' has no attribute 'UserPreferencesSerializer' | PATCH `/api/v1/dashboard/profile/user-preferences/` | 18 roles | M-48 |
+| `api/dashboard/projects/projects_view.py:36` | DoesNotExist: Project matching query does not exist. | GET `/api/v1/dashboard/projects/<uuid:pk>/` | 18 roles | L-12 |
+| `api/dashboard/projects/projects_view.py:57` | DoesNotExist: Project matching query does not exist. | PUT `/api/v1/dashboard/projects/<uuid:pk>/` | 18 roles | L-12 |
+| `api/dashboard/roles/dash_roles_views.py:304` | TypeError: 'NoneType' object is not iterable | PATCH `/api/v1/dashboard/roles/bulk-assign/<str:role_id>/` | admin | M-02, L-29 |
+| `api/dashboard/roles/dash_roles_views.py:470` | FileNotFoundError: [Errno 2] No such file or directory: './excel-templates/role_base_template.xlsx' | GET `/api/v1/dashboard/roles/base-template/` | 18 roles | test artefact — not a bug (template path depends on the working directory / generated dates / mocked partner reply) |
+| `api/dashboard/task/dash_task_view.py:1158` | FileNotFoundError: [Errno 2] No such file or directory: './excel-templates/task_base_template.xlsx' | GET `/api/v1/dashboard/task/base-template/` | admin, associate, fellow | test artefact — not a bug (template path depends on the working directory / generated dates / mocked partner reply) |
+| `api/dashboard/user/dash_user_views.py:315` | DoesNotExist: UserRoleLink matching query does not exist. | PATCH `/api/v1/dashboard/user/verification/<str:link_id>/` | admin | H-07, L-12, L-22 |
+| `api/dashboard/user/dash_user_views.py:350` | DoesNotExist: UserRoleLink matching query does not exist. | DELETE `/api/v1/dashboard/user/verification/<str:link_id>/` | admin | H-07, L-12, L-22 |
+| `api/hackathon/serializer.py:366` | IntegrityError: NOT NULL constraint failed: hackathon_submission.hackathon_id | POST `/api/v1/hackathon/submit-hackathon/` | admin | M-53 |
+| `api/hackathon/serializer.py:398` | KeyError: 'muid' | POST `/api/v1/hackathon/add-organiser/<str:hackathon_id>/`<br>POST `/api/v1/hackathon/list-organiser-hackathons/<str:hackathon_id>/` | admin | M-53 |
+| `api/hackathon/serializer.py:425` | AttributeError: 'NoneType' object has no attribute 'get' | GET `/api/v1/hackathon/list-applicants/`<br>GET `/api/v1/hackathon/list-applicants/<str:hackathon_id>/` | admin | M-53 |
+| `api/integrations/integrations_helper.py:26` | DecodeError: Not enough segments | PATCH `/api/v1/integrations/kkem/authorization/<str:token>/` | 19 roles | L-12 |
+| `api/integrations/integrations_helper.py:74` | CustomException: Invalid Authorization header | GET `/api/v1/integrations/kkem/hackathon-stats/`<br>GET `/api/v1/integrations/kkem/users/`<br>GET `/api/v1/integrations/kkem/users/<str:muid>/` | anon | L-12 |
+| `api/integrations/integrations_helper.py:81` | CustomException: Invalid Authorization header | GET `/api/v1/integrations/kkem/hackathon-stats/`<br>GET `/api/v1/integrations/kkem/users/`<br>GET `/api/v1/integrations/kkem/users/<str:muid>/` | 18 roles | L-12 |
+| `api/launchpad/launchpad_views.py:1024` | KeyError: 'user_type' | GET `/api/v1/launchpad/list-launchpad-students/<str:job_id>/` | 18 roles | M-50, H-26 |
+| `api/launchpad/launchpad_views.py:1216` | KeyError: 'user_type' | GET `/api/v1/launchpad/hire-requests/` | 18 roles | M-50 |
+| `api/launchpad/launchpad_views.py:1500` | KeyError: 'user_type' | POST `/api/v1/launchpad/send-job-invitations/` | 18 roles | M-50 |
+| `api/launchpad/launchpad_views.py:1771` | KeyError: 'user_type' | GET `/api/v1/launchpad/accepted-students/`<br>GET `/api/v1/launchpad/accepted-students/<str:job_id>/` | 18 roles | M-50 |
+| `api/launchpad/launchpad_views.py:1994` | KeyError: 'user_type' | POST `/api/v1/launchpad/application-final-decision/` | 18 roles | M-50 |
+| `api/launchpad/launchpad_views.py:251` | KeyError: 'user_type' | POST `/api/v1/launchpad/register-recruiter/` | 18 roles | M-50 |
+| `api/launchpad/launchpad_views.py:311` | KeyError: 'user_type' | POST `/api/v1/launchpad/add-job/` | 18 roles | M-50 |
+| `api/launchpad/launchpad_views.py:3315` | KeyError: 'user_type' | POST `/api/v1/launchpad/change-password/` | 18 roles | M-50 |
+| `api/launchpad/launchpad_views.py:426` | KeyError: 'user_type' | GET `/api/v1/launchpad/job/<str:job_id>/` | 18 roles | M-50 |
+| `api/launchpad/launchpad_views.py:484` | KeyError: 'user_type' | PUT `/api/v1/launchpad/job/<str:job_id>/` | 18 roles | M-50 |
+| `api/launchpad/launchpad_views.py:565` | KeyError: 'user_type' | DELETE `/api/v1/launchpad/job/<str:job_id>/` | 18 roles | M-50 |
+| `api/top100_coders/top100_view.py:74` | OperationalError: no such column: u.profile_pic | GET `/api/v1/top100/leaderboard/` | 19 roles | M-49 |
+| `mulearnbackend/middlewares.py:156` | AssertionError: Expected a `Response`, `HttpResponse` or `HttpStreamingResponse` to be returned from the view, but received a `<class 'NoneT | GET `/api/v1/dashboard/profile/share-user-profile/` | 18 roles | L-25 |
+| `utils/permission.py:124` | IndexError: list index out of range | GET `/api/v1/dashboard/organisation/affiliation/list/`<br>GET `/api/v1/dashboard/organisation/institutes/info/<str:org_code>/`<br>GET `/api/v1/dashboard/organisation/institutes/prefill/<str:org_code>/`<br>PATCH `/api/v1/dashboard/achievement/rules/<str:rule_id>/`<br>PATCH `/api/v1/launchpad/delete-company/` | anon | L-10, L-14, C-04, M-50 |
+| `utils/permission.py:137` | IndexError: list index out of range | DELETE `/api/v1/dashboard/achievement/delete/<str:achievement_id>/`<br>GET `/api/v1/dashboard/achievement/audit/<str:muid>/`<br>GET `/api/v1/dashboard/achievement/debug/<str:muid>/<str:achievement_id>/`<br>GET `/api/v1/dashboard/achievement/eligible/`<br>GET `/api/v1/dashboard/achievement/issued-log/`<br>GET `/api/v1/dashboard/achievement/list/`<br>(+24 more) | anon | C-02, L-10, H-23, L-37, H-15 |
+| `utils/utils.py:100` | AttributeError: 'list' object has no attribute '_fields' | GET `/api/v1/dashboard/discord-moderator/leaderboard/`<br>GET `/api/v1/dashboard/dynamic-management/dynamic-role/`<br>GET `/api/v1/dashboard/dynamic-management/dynamic-role/create/`<br>GET `/api/v1/dashboard/dynamic-management/dynamic-user/`<br>GET `/api/v1/dashboard/dynamic-management/dynamic-user/create/`<br>GET `/api/v1/dashboard/mentor/activity/` | 18 roles | H-26 |
+
+## Appendix H — Route/method pairs that crash because the view signature does not match the URL (L-11)
+
+These return 500 instead of 405. Most are never called by the dashboard; they show how the shared-view pattern breaks.
+
+| Method | Path | Error |
+|---|---|---|
+| DELETE | `/api/v1/dashboard/affiliation/` | TypeError: AffiliationCRUDAPI.delete() missing 1 required positional argument: 'affiliation_id' |
+| PUT | `/api/v1/dashboard/affiliation/` | TypeError: AffiliationCRUDAPI.put() missing 1 required positional argument: 'affiliation_id' |
+| GET | `/api/v1/dashboard/affiliation/<str:affiliation_id>/` | TypeError: AffiliationCRUDAPI.get() got an unexpected keyword argument 'affiliation_id' |
+| POST | `/api/v1/dashboard/affiliation/<str:affiliation_id>/` | TypeError: AffiliationCRUDAPI.post() got an unexpected keyword argument 'affiliation_id' |
+| GET | `/api/v1/dashboard/campus/execom/<str:member_id>/` | TypeError: CampusExecomAPI.get() got an unexpected keyword argument 'member_id' |
+| POST | `/api/v1/dashboard/campus/execom/<str:member_id>/` | TypeError: CampusExecomAPI.post() got an unexpected keyword argument 'member_id' |
+| DELETE | `/api/v1/dashboard/campus/ig-chapters/` | TypeError: CampusIGChapterAPI.delete() missing 1 required positional argument: 'chapter_id' |
+| PATCH | `/api/v1/dashboard/campus/ig-chapters/` | TypeError: CampusIGChapterAPI.patch() missing 1 required positional argument: 'chapter_id' |
+| GET | `/api/v1/dashboard/campus/ig-chapters/<str:chapter_id>/` | TypeError: CampusIGChapterAPI.get() got an unexpected keyword argument 'chapter_id' |
+| POST | `/api/v1/dashboard/campus/ig-chapters/<str:chapter_id>/` | TypeError: CampusIGChapterAPI.post() got an unexpected keyword argument 'chapter_id' |
+| DELETE | `/api/v1/dashboard/campus/social-links/` | TypeError: CampusSocialLinkAPI.delete() missing 1 required positional argument: 'link_id' |
+| PUT | `/api/v1/dashboard/campus/social-links/<str:link_id>/` | TypeError: CampusSocialLinkAPI.put() got an unexpected keyword argument 'link_id' |
+| DELETE | `/api/v1/dashboard/category/` | TypeError: CategoryAPI.delete() missing 1 required positional argument: 'category_id' |
+| PATCH | `/api/v1/dashboard/category/` | TypeError: CategoryAPI.patch() missing 1 required positional argument: 'category_id' |
+| PUT | `/api/v1/dashboard/category/` | TypeError: CategoryAPI.put() missing 1 required positional argument: 'category_id' |
+| POST | `/api/v1/dashboard/category/<str:category_id>/` | TypeError: CategoryAPI.post() got an unexpected keyword argument 'category_id' |
+| DELETE | `/api/v1/dashboard/channels/` | TypeError: ChannelCRUDAPI.delete() missing 1 required positional argument: 'channel_id' |
+| PUT | `/api/v1/dashboard/channels/` | TypeError: ChannelCRUDAPI.put() missing 1 required positional argument: 'channel_id' |
+| GET | `/api/v1/dashboard/channels/<str:channel_id>/` | TypeError: ChannelCRUDAPI.get() got an unexpected keyword argument 'channel_id' |
+| POST | `/api/v1/dashboard/channels/<str:channel_id>/` | TypeError: ChannelCRUDAPI.post() got an unexpected keyword argument 'channel_id' |
+| DELETE | `/api/v1/dashboard/company/mulearners/shortlist/` | TypeError: CompanyTalentShortlistAPI.delete() missing 1 required positional argument: 'user_id' |
+| GET | `/api/v1/dashboard/company/mulearners/shortlist/<str:user_id>/` | TypeError: CompanyTalentShortlistAPI.get() got an unexpected keyword argument 'user_id' |
+| POST | `/api/v1/dashboard/company/mulearners/shortlist/<str:user_id>/` | TypeError: CompanyTalentShortlistAPI.post() got an unexpected keyword argument 'user_id' |
+| DELETE | `/api/v1/dashboard/dynamic-management/dynamic-role/` | TypeError: DynamicRoleAPI.delete() missing 1 required positional argument: 'type_id' |
+| PATCH | `/api/v1/dashboard/dynamic-management/dynamic-role/` | TypeError: DynamicRoleAPI.patch() missing 1 required positional argument: 'type_id' |
+| DELETE | `/api/v1/dashboard/dynamic-management/dynamic-role/create/` | TypeError: DynamicRoleAPI.delete() missing 1 required positional argument: 'type_id' |
+| PATCH | `/api/v1/dashboard/dynamic-management/dynamic-role/create/` | TypeError: DynamicRoleAPI.patch() missing 1 required positional argument: 'type_id' |
+| GET | `/api/v1/dashboard/dynamic-management/dynamic-role/delete/<str:type_id>/` | TypeError: DynamicRoleAPI.get() got an unexpected keyword argument 'type_id' |
+| POST | `/api/v1/dashboard/dynamic-management/dynamic-role/delete/<str:type_id>/` | TypeError: DynamicRoleAPI.post() got an unexpected keyword argument 'type_id' |
+| GET | `/api/v1/dashboard/dynamic-management/dynamic-role/update/<str:type_id>/` | TypeError: DynamicRoleAPI.get() got an unexpected keyword argument 'type_id' |
+| POST | `/api/v1/dashboard/dynamic-management/dynamic-role/update/<str:type_id>/` | TypeError: DynamicRoleAPI.post() got an unexpected keyword argument 'type_id' |
+| DELETE | `/api/v1/dashboard/dynamic-management/dynamic-user/` | TypeError: DynamicUserAPI.delete() missing 1 required positional argument: 'type_id' |
+| PATCH | `/api/v1/dashboard/dynamic-management/dynamic-user/` | TypeError: DynamicUserAPI.patch() missing 1 required positional argument: 'type_id' |
+| DELETE | `/api/v1/dashboard/dynamic-management/dynamic-user/create/` | TypeError: DynamicUserAPI.delete() missing 1 required positional argument: 'type_id' |
+| PATCH | `/api/v1/dashboard/dynamic-management/dynamic-user/create/` | TypeError: DynamicUserAPI.patch() missing 1 required positional argument: 'type_id' |
+| GET | `/api/v1/dashboard/dynamic-management/dynamic-user/delete/<str:type_id>/` | TypeError: DynamicUserAPI.get() got an unexpected keyword argument 'type_id' |
+| POST | `/api/v1/dashboard/dynamic-management/dynamic-user/delete/<str:type_id>/` | TypeError: DynamicUserAPI.post() got an unexpected keyword argument 'type_id' |
+| GET | `/api/v1/dashboard/dynamic-management/dynamic-user/update/<str:type_id>/` | TypeError: DynamicUserAPI.get() got an unexpected keyword argument 'type_id' |
+| POST | `/api/v1/dashboard/dynamic-management/dynamic-user/update/<str:type_id>/` | TypeError: DynamicUserAPI.post() got an unexpected keyword argument 'type_id' |
+| PATCH | `/api/v1/dashboard/error-log/` | TypeError: LoggerAPI.patch() missing 1 required positional argument: 'error_id' |
+| GET | `/api/v1/dashboard/error-log/patch/<str:error_id>/` | TypeError: LoggerAPI.get() got an unexpected keyword argument 'error_id' |
+| DELETE | `/api/v1/dashboard/ig/` | TypeError: InterestGroupAPI.delete() missing 1 required positional argument: 'pk' |
+| PUT | `/api/v1/dashboard/ig/` | TypeError: InterestGroupAPI.put() missing 1 required positional argument: 'pk' |
+| GET | `/api/v1/dashboard/ig/<str:pk>/` | TypeError: InterestGroupAPI.get() got an unexpected keyword argument 'pk' |
+| POST | `/api/v1/dashboard/ig/<str:pk>/` | TypeError: InterestGroupAPI.post() got an unexpected keyword argument 'pk' |
+| DELETE | `/api/v1/dashboard/ig/request/` | TypeError: InterestGroupRequestAPI.delete() missing 1 required positional argument: 'pk' |
+| PATCH | `/api/v1/dashboard/ig/request/` | TypeError: InterestGroupRequestAPI.patch() missing 1 required positional argument: 'pk' |
+| GET | `/api/v1/dashboard/ig/request/<str:pk>/` | TypeError: InterestGroupRequestAPI.get() got an unexpected keyword argument 'pk' |
+| POST | `/api/v1/dashboard/ig/request/<str:pk>/` | TypeError: InterestGroupRequestAPI.post() got an unexpected keyword argument 'pk' |
+| POST | `/api/v1/dashboard/intern/leave/<str:leave_id>/` | TypeError: InternLeaveRequestAPI.post() got an unexpected keyword argument 'leave_id' |
+| POST | `/api/v1/dashboard/intern/leave/<str:leave_id>/cancel/` | TypeError: InternLeaveRequestAPI.post() got an unexpected keyword argument 'leave_id' |
+| DELETE | `/api/v1/dashboard/intern/minutes/` | TypeError: InternGuildMinuteAPI.delete() missing 1 required positional argument: 'minute_id' |
+| PUT | `/api/v1/dashboard/intern/minutes/` | TypeError: InternGuildMinuteAPI.put() missing 1 required positional argument: 'minute_id' |
+| POST | `/api/v1/dashboard/intern/minutes/<str:minute_id>/` | TypeError: InternGuildMinuteAPI.post() got an unexpected keyword argument 'minute_id' |
+| PATCH | `/api/v1/dashboard/intern/reviews/` | TypeError: InternWeeklyReviewAPI.patch() missing 1 required positional argument: 'review_id' |
+| POST | `/api/v1/dashboard/intern/reviews/<str:review_id>/` | TypeError: InternWeeklyReviewAPI.post() got an unexpected keyword argument 'review_id' |
+| PATCH | `/api/v1/dashboard/intern/timesheets/` | TypeError: InternTimesheetAPI.patch() missing 1 required positional argument: 'timesheet_id' |
+| POST | `/api/v1/dashboard/intern/timesheets/<str:timesheet_id>/` | TypeError: InternTimesheetAPI.post() got an unexpected keyword argument 'timesheet_id' |
+| DELETE | `/api/v1/dashboard/karma-voucher/` | TypeError: VoucherLogAPI.delete() missing 1 required positional argument: 'voucher_id' |
+| PATCH | `/api/v1/dashboard/karma-voucher/` | TypeError: VoucherLogAPI.patch() missing 1 required positional argument: 'voucher_id' |
+| DELETE | `/api/v1/dashboard/karma-voucher/create/` | TypeError: VoucherLogAPI.delete() missing 1 required positional argument: 'voucher_id' |
+| PATCH | `/api/v1/dashboard/karma-voucher/create/` | TypeError: VoucherLogAPI.patch() missing 1 required positional argument: 'voucher_id' |
+| GET | `/api/v1/dashboard/karma-voucher/delete/<str:voucher_id>/` | TypeError: VoucherLogAPI.get() got an unexpected keyword argument 'voucher_id' |
+| POST | `/api/v1/dashboard/karma-voucher/delete/<str:voucher_id>/` | TypeError: VoucherLogAPI.post() got an unexpected keyword argument 'voucher_id' |
+| GET | `/api/v1/dashboard/karma-voucher/update/<str:voucher_id>/` | TypeError: VoucherLogAPI.get() got an unexpected keyword argument 'voucher_id' |
+| POST | `/api/v1/dashboard/karma-voucher/update/<str:voucher_id>/` | TypeError: VoucherLogAPI.post() got an unexpected keyword argument 'voucher_id' |
+| DELETE | `/api/v1/dashboard/learningcircle/create/` | TypeError: LearningCircleView.delete() missing 1 required positional argument: 'circle_id' |
+| PUT | `/api/v1/dashboard/learningcircle/create/` | TypeError: LearningCircleView.put() missing 1 required positional argument: 'circle_id' |
+| POST | `/api/v1/dashboard/learningcircle/delete/<str:circle_id>/` | TypeError: LearningCircleView.post() got an unexpected keyword argument 'circle_id' |
+| POST | `/api/v1/dashboard/learningcircle/edit/<str:circle_id>/` | TypeError: LearningCircleView.post() got an unexpected keyword argument 'circle_id' |
+| POST | `/api/v1/dashboard/learningcircle/info/<str:circle_id>/` | TypeError: LearningCircleView.post() got an unexpected keyword argument 'circle_id' |
+| GET | `/api/v1/dashboard/learningcircle/invite/status/<str:link_id>/` | TypeError: CircleInviteStatusAPI.get() got an unexpected keyword argument 'link_id' |
+| DELETE | `/api/v1/dashboard/learningcircle/list/` | TypeError: LearningCircleView.delete() missing 1 required positional argument: 'circle_id' |
+| PUT | `/api/v1/dashboard/learningcircle/list/` | TypeError: LearningCircleView.put() missing 1 required positional argument: 'circle_id' |
+| DELETE | `/api/v1/dashboard/learningcircle/meeting/create/<str:circle_id>/` | TypeError: LearningCircleMeetingView.delete() got an unexpected keyword argument 'circle_id' |
+| PUT | `/api/v1/dashboard/learningcircle/meeting/create/<str:circle_id>/` | TypeError: LearningCircleMeetingView.put() got an unexpected keyword argument 'circle_id' |
+| POST | `/api/v1/dashboard/learningcircle/meeting/delete/<str:meet_id>/` | TypeError: LearningCircleMeetingView.post() got an unexpected keyword argument 'meet_id' |
+| POST | `/api/v1/dashboard/learningcircle/meeting/edit/<str:meet_id>/` | TypeError: LearningCircleMeetingView.post() got an unexpected keyword argument 'meet_id' |
+| DELETE | `/api/v1/dashboard/location/countries/` | TypeError: CountryDataAPI.delete() missing 1 required positional argument: 'country_id' |
+| PATCH | `/api/v1/dashboard/location/countries/` | TypeError: CountryDataAPI.patch() missing 1 required positional argument: 'country_id' |
+| POST | `/api/v1/dashboard/location/countries/<str:country_id>/` | TypeError: CountryDataAPI.post() got an unexpected keyword argument 'country_id' |
+| DELETE | `/api/v1/dashboard/location/districts/` | TypeError: DistrictDataAPI.delete() missing 1 required positional argument: 'district_id' |
+| PATCH | `/api/v1/dashboard/location/districts/` | TypeError: DistrictDataAPI.patch() missing 1 required positional argument: 'district_id' |
+| POST | `/api/v1/dashboard/location/districts/<str:district_id>/` | TypeError: DistrictDataAPI.post() got an unexpected keyword argument 'district_id' |
+| DELETE | `/api/v1/dashboard/location/states/` | TypeError: StateDataAPI.delete() missing 1 required positional argument: 'state_id' |
+| PATCH | `/api/v1/dashboard/location/states/` | TypeError: StateDataAPI.patch() missing 1 required positional argument: 'state_id' |
+| POST | `/api/v1/dashboard/location/states/<str:state_id>/` | TypeError: StateDataAPI.post() got an unexpected keyword argument 'state_id' |
+| DELETE | `/api/v1/dashboard/location/zones/` | TypeError: ZoneDataAPI.delete() missing 1 required positional argument: 'zone_id' |
+| PATCH | `/api/v1/dashboard/location/zones/` | TypeError: ZoneDataAPI.patch() missing 1 required positional argument: 'zone_id' |
+| POST | `/api/v1/dashboard/location/zones/<str:zone_id>/` | TypeError: ZoneDataAPI.post() got an unexpected keyword argument 'zone_id' |
+| DELETE | `/api/v1/dashboard/manage-interns/interns/` | TypeError: ManageInternAPI.delete() missing 1 required positional argument: 'intern_id' |
+| PATCH | `/api/v1/dashboard/manage-interns/interns/` | TypeError: ManageInternAPI.patch() missing 1 required positional argument: 'intern_id' |
+| POST | `/api/v1/dashboard/manage-interns/interns/<str:intern_id>/` | TypeError: ManageInternAPI.post() got an unexpected keyword argument 'intern_id' |
+| DELETE | `/api/v1/dashboard/manage-interns/tasks/` | TypeError: ManageInternTaskAPI.delete() missing 1 required positional argument: 'task_id' |
+| PATCH | `/api/v1/dashboard/manage-interns/tasks/` | TypeError: ManageInternTaskAPI.patch() missing 1 required positional argument: 'task_id' |
+| POST | `/api/v1/dashboard/manage-interns/tasks/<str:task_id>/` | TypeError: ManageInternTaskAPI.post() got an unexpected keyword argument 'task_id' |
+| DELETE | `/api/v1/dashboard/mentor/admin/assign/` | TypeError: AdminAssignMentorAPI.delete() missing 1 required positional argument: 'user_muid' |
+| POST | `/api/v1/dashboard/mentor/admin/assign/<str:user_muid>/` | TypeError: AdminAssignMentorAPI.post() got an unexpected keyword argument 'user_muid' |
+| DELETE | `/api/v1/dashboard/mentor/availability/` | TypeError: MentorAvailabilitySlotAPI.delete() missing 1 required positional argument: 'slot_id' |
+| PATCH | `/api/v1/dashboard/mentor/availability/` | TypeError: MentorAvailabilitySlotAPI.patch() missing 1 required positional argument: 'slot_id' |
+| POST | `/api/v1/dashboard/mentor/availability/<str:slot_id>/` | TypeError: MentorAvailabilitySlotAPI.post() got an unexpected keyword argument 'slot_id' |
+| DELETE | `/api/v1/dashboard/organisation/departments/` | TypeError: DepartmentAPI.delete() missing 1 required positional argument: 'department_id' |
+| PUT | `/api/v1/dashboard/organisation/departments/` | TypeError: DepartmentAPI.put() missing 1 required positional argument: 'department_id' |
+| DELETE | `/api/v1/dashboard/organisation/departments/create/` | TypeError: DepartmentAPI.delete() missing 1 required positional argument: 'department_id' |
+| PUT | `/api/v1/dashboard/organisation/departments/create/` | TypeError: DepartmentAPI.put() missing 1 required positional argument: 'department_id' |
+| GET | `/api/v1/dashboard/organisation/departments/delete/<str:department_id>/` | TypeError: DepartmentAPI.get() got an unexpected keyword argument 'department_id' |
+| POST | `/api/v1/dashboard/organisation/departments/delete/<str:department_id>/` | TypeError: DepartmentAPI.post() got an unexpected keyword argument 'department_id' |
+| GET | `/api/v1/dashboard/organisation/departments/edit/<str:department_id>/` | TypeError: DepartmentAPI.get() got an unexpected keyword argument 'department_id' |
+| POST | `/api/v1/dashboard/organisation/departments/edit/<str:department_id>/` | TypeError: DepartmentAPI.post() got an unexpected keyword argument 'department_id' |
+| DELETE | `/api/v1/dashboard/organisation/institutes/create/` | TypeError: InstitutionPostUpdateDeleteAPI.delete() missing 1 required positional argument: 'org_code' |
+| PUT | `/api/v1/dashboard/organisation/institutes/create/` | TypeError: InstitutionPostUpdateDeleteAPI.put() missing 1 required positional argument: 'org_code' |
+| POST | `/api/v1/dashboard/organisation/institutes/delete/<str:org_code>/` | TypeError: InstitutionPostUpdateDeleteAPI.post() got an unexpected keyword argument 'org_code' |
+| POST | `/api/v1/dashboard/organisation/institutes/edit/<str:org_code>/` | TypeError: InstitutionPostUpdateDeleteAPI.post() got an unexpected keyword argument 'org_code' |
+| DELETE | `/api/v1/dashboard/organisation/institutes/org/affiliation/create/` | TypeError: AffiliationGetPostUpdateDeleteAPI.delete() missing 1 required positional argument: 'affiliation_id' |
+| PUT | `/api/v1/dashboard/organisation/institutes/org/affiliation/create/` | TypeError: AffiliationGetPostUpdateDeleteAPI.put() missing 1 required positional argument: 'affiliation_id' |
+| GET | `/api/v1/dashboard/organisation/institutes/org/affiliation/delete/<str:affiliation_id>/` | TypeError: AffiliationGetPostUpdateDeleteAPI.get() got an unexpected keyword argument 'affiliation_id' |
+| POST | `/api/v1/dashboard/organisation/institutes/org/affiliation/delete/<str:affiliation_id>/` | TypeError: AffiliationGetPostUpdateDeleteAPI.post() got an unexpected keyword argument 'affiliation_id' |
+| GET | `/api/v1/dashboard/organisation/institutes/org/affiliation/edit/<str:affiliation_id>/` | TypeError: AffiliationGetPostUpdateDeleteAPI.get() got an unexpected keyword argument 'affiliation_id' |
+| POST | `/api/v1/dashboard/organisation/institutes/org/affiliation/edit/<str:affiliation_id>/` | TypeError: AffiliationGetPostUpdateDeleteAPI.post() got an unexpected keyword argument 'affiliation_id' |
+| DELETE | `/api/v1/dashboard/organisation/institutes/org/affiliation/show/` | TypeError: AffiliationGetPostUpdateDeleteAPI.delete() missing 1 required positional argument: 'affiliation_id' |
+| PUT | `/api/v1/dashboard/organisation/institutes/org/affiliation/show/` | TypeError: AffiliationGetPostUpdateDeleteAPI.put() missing 1 required positional argument: 'affiliation_id' |
+| PUT | `/api/v1/dashboard/profile/share-user-profile/<str:uuid>/` | TypeError: ShareUserProfileAPI.put() got an unexpected keyword argument 'uuid' |
+| DELETE | `/api/v1/dashboard/projects/<uuid:project_id>/members/` | TypeError: ProjectMemberAPI.delete() missing 1 required positional argument: 'pk' |
+| GET | `/api/v1/dashboard/projects/<uuid:project_id>/members/<uuid:pk>/` | TypeError: ProjectMemberAPI.get() got an unexpected keyword argument 'pk' |
+| POST | `/api/v1/dashboard/projects/<uuid:project_id>/members/<uuid:pk>/` | TypeError: ProjectMemberAPI.post() got an unexpected keyword argument 'pk' |
+| DELETE | `/api/v1/dashboard/projects/comment/` | TypeError: ProjectCommentAPI.delete() missing 1 required positional argument: 'pk' |
+| PUT | `/api/v1/dashboard/projects/comment/` | TypeError: ProjectCommentAPI.put() missing 1 required positional argument: 'pk' |
+| POST | `/api/v1/dashboard/projects/comment/<uuid:pk>/` | TypeError: ProjectCommentAPI.post() got an unexpected keyword argument 'pk' |
+| DELETE | `/api/v1/dashboard/projects/vote/` | TypeError: ProjectVoteAPI.delete() missing 1 required positional argument: 'pk' |
+| POST | `/api/v1/dashboard/projects/vote/<uuid:pk>/` | TypeError: ProjectVoteAPI.post() got an unexpected keyword argument 'pk' |
+| DELETE | `/api/v1/dashboard/roles/` | TypeError: RoleAPI.delete() missing 1 required positional argument: 'roles_id' |
+| PATCH | `/api/v1/dashboard/roles/` | TypeError: RoleAPI.patch() missing 1 required positional argument: 'roles_id' |
+| GET | `/api/v1/dashboard/roles/<str:roles_id>/` | TypeError: RoleAPI.get() got an unexpected keyword argument 'roles_id' |
+| POST | `/api/v1/dashboard/roles/<str:roles_id>/` | TypeError: RoleAPI.post() got an unexpected keyword argument 'roles_id' |
+| GET | `/api/v1/dashboard/roles/bulk-assign/` | TypeError: UserRoleLinkManagement.get() missing 1 required positional argument: 'role_id' |
+| PATCH | `/api/v1/dashboard/roles/bulk-assign/` | TypeError: UserRoleLinkManagement.patch() missing 1 required positional argument: 'role_id' |
+| POST | `/api/v1/dashboard/roles/bulk-assign/` | TypeError: UserRoleLinkManagement.post() missing 1 required positional argument: 'role_id' |
+| PUT | `/api/v1/dashboard/roles/bulk-assign/` | TypeError: UserRoleLinkManagement.put() missing 1 required positional argument: 'role_id' |
+| GET | `/api/v1/dashboard/task/<str:task_id>/review/` | TypeError: AdminTaskApprovalAPI.get() got an unexpected keyword argument 'task_id' |
+| DELETE | `/api/v1/dashboard/task/list-task-type/` | TypeError: TaskTypeCrudAPI.delete() missing 1 required positional argument: 'task_type_id' |
+| PUT | `/api/v1/dashboard/task/list-task-type/` | TypeError: TaskTypeCrudAPI.put() missing 1 required positional argument: 'task_type_id' |
+| PATCH | `/api/v1/dashboard/task/pending/` | TypeError: AdminTaskApprovalAPI.patch() missing 1 required positional argument: 'task_id' |
+| GET | `/api/v1/dashboard/task/task-type/<str:task_type_id>/` | TypeError: TaskTypeCrudAPI.get() got an unexpected keyword argument 'task_type_id' |
+| POST | `/api/v1/dashboard/task/task-type/<str:task_type_id>/` | TypeError: TaskTypeCrudAPI.post() got an unexpected keyword argument 'task_type_id' |
+| DELETE | `/api/v1/dashboard/user/verification/` | TypeError: UserVerificationAPI.delete() missing 1 required positional argument: 'link_id' |
+| PATCH | `/api/v1/dashboard/user/verification/` | TypeError: UserVerificationAPI.patch() missing 1 required positional argument: 'link_id' |
+| GET | `/api/v1/dashboard/user/verification/<str:link_id>/` | TypeError: UserVerificationAPI.get() got an unexpected keyword argument 'link_id' |
+| DELETE | `/api/v1/hackathon/add-organiser/<str:hackathon_id>/` | TypeError: HackathonOrganiserAPI.delete() got an unexpected keyword argument 'hackathon_id' |
+| DELETE | `/api/v1/hackathon/create-hackathon/` | TypeError: HackathonManagementAPI.delete() missing 1 required positional argument: 'hackathon_id' |
+| PUT | `/api/v1/hackathon/create-hackathon/` | TypeError: HackathonManagementAPI.put() missing 1 required positional argument: 'hackathon_id' |
+| POST | `/api/v1/hackathon/delete-hackathon/<str:hackathon_id>/` | TypeError: HackathonManagementAPI.post() got an unexpected keyword argument 'hackathon_id' |
+| GET | `/api/v1/hackathon/delete-organiser/<str:organiser_link_id>/` | TypeError: HackathonOrganiserAPI.get() got an unexpected keyword argument 'organiser_link_id' |
+| POST | `/api/v1/hackathon/delete-organiser/<str:organiser_link_id>/` | TypeError: HackathonOrganiserAPI.post() got an unexpected keyword argument 'organiser_link_id' |
+| POST | `/api/v1/hackathon/edit-hackathon/<str:hackathon_id>/` | TypeError: HackathonManagementAPI.post() got an unexpected keyword argument 'hackathon_id' |
+| DELETE | `/api/v1/hackathon/list-hackathons/` | TypeError: HackathonManagementAPI.delete() missing 1 required positional argument: 'hackathon_id' |
+| PUT | `/api/v1/hackathon/list-hackathons/` | TypeError: HackathonManagementAPI.put() missing 1 required positional argument: 'hackathon_id' |
+| POST | `/api/v1/hackathon/list-hackathons/<str:hackathon_id>/` | TypeError: HackathonManagementAPI.post() got an unexpected keyword argument 'hackathon_id' |
+| DELETE | `/api/v1/hackathon/list-hackathons/upcoming/` | TypeError: HackathonManagementAPI.delete() missing 1 required positional argument: 'hackathon_id' |
+| PUT | `/api/v1/hackathon/list-hackathons/upcoming/` | TypeError: HackathonManagementAPI.put() missing 1 required positional argument: 'hackathon_id' |
+| DELETE | `/api/v1/hackathon/list-organiser-hackathons/<str:hackathon_id>/` | TypeError: HackathonOrganiserAPI.delete() got an unexpected keyword argument 'hackathon_id' |
+| PATCH | `/api/v1/integrations/kkem/authorization/` | TypeError: KKEMAuthorizationAPI.patch() missing 1 required positional argument: 'token' |
+| POST | `/api/v1/integrations/kkem/authorization/<str:token>/` | TypeError: KKEMAuthorizationAPI.post() got an unexpected keyword argument 'token' |
+| PUT | `/api/v1/launchpad/user-college-link/` | TypeError: LaunchPadUser.put() missing 1 required positional argument: 'email' |
+| GET | `/api/v1/launchpad/user-college-link/<str:email>` | TypeError: LaunchPadUser.get() got an unexpected keyword argument 'email' |
+| POST | `/api/v1/launchpad/user-college-link/<str:email>` | TypeError: LaunchPadUser.post() got an unexpected keyword argument 'email' |
+| DELETE | `/api/v1/url-shortener/create/` | TypeError: UrlShortenerAPI.delete() missing 1 required positional argument: 'url_id' |
+| PUT | `/api/v1/url-shortener/create/` | TypeError: UrlShortenerAPI.put() missing 1 required positional argument: 'url_id' |
+| GET | `/api/v1/url-shortener/delete/<str:url_id>/` | TypeError: UrlShortenerAPI.get() got an unexpected keyword argument 'url_id' |
+| POST | `/api/v1/url-shortener/delete/<str:url_id>/` | TypeError: UrlShortenerAPI.post() got an unexpected keyword argument 'url_id' |
+| GET | `/api/v1/url-shortener/edit/<str:url_id>/` | TypeError: UrlShortenerAPI.get() got an unexpected keyword argument 'url_id' |
+| POST | `/api/v1/url-shortener/edit/<str:url_id>/` | TypeError: UrlShortenerAPI.post() got an unexpected keyword argument 'url_id' |
+| DELETE | `/api/v1/url-shortener/list/` | TypeError: UrlShortenerAPI.delete() missing 1 required positional argument: 'url_id' |
+| PUT | `/api/v1/url-shortener/list/` | TypeError: UrlShortenerAPI.put() missing 1 required positional argument: 'url_id' |
