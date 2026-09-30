@@ -2,14 +2,14 @@
 
 | Item | Value |
 |---|---|
-| Date | 2026-09-30 (second, exhaustive pass; replaces the first report of the same day) |
+| Date | 2026-09-30 (second, exhaustive pass, plus a third pass that measures performance; replaces the first report of the same day) |
 | Dashboard repo / branch | `DevWithPranav/mulearn-dashboard` @ `dev` (`50c7052`, 2026-09-25) |
 | Backend repo / branch | `DevWithPranav/mulearnbackend` @ `pranav-dev` (`ad02b2a`, 2026-09-16) |
 | Backend comparison base | `dev` (`c4a8536`). `pranav-dev` is 194 commits ahead: 137 files, +11,525 / −3,752 lines |
 | Auth server repo / branch | `DevWithPranav/authserver` @ `dev` (`c749e90`, 2026-07-17). Unmerged branch `feat/new-auth` (`b790491`, 2026-09-24) was checked for fixes only |
-| Scope | Full regression + production audit: **every backend endpoint (1,123 unique route + method pairs)**, **every dashboard page (129 pages)**, the auth server, and the integration between them |
+| Scope | Full regression + production audit: **every backend endpoint (1,123 unique route + method pairs)**, **every dashboard page (129 pages)**, the auth server, the integration between them, and the **performance of every endpoint and page** |
 
-**How to read this report.** Issue IDs from the first report are kept (C-01…C-09, H-01…H-20, M-01…M-28, L-01…L-09) so earlier discussions still match. Everything found in this second pass continues the numbering: **C-10, H-21…H-35, M-29…M-59, L-10…L-55**. Section 5 and Appendix E list **every endpoint** with its access level, the roles that got through in testing, whether the dashboard uses it, any crash seen, and the issue IDs that apply. Section 7 and Appendix F list **every page** with what happened when it was opened as each role.
+**How to read this report.** Issue IDs from the first report are kept (C-01…C-09, H-01…H-20, M-01…M-28, L-01…L-09) so earlier discussions still match. Everything found in this second pass continues the numbering: **C-10, H-21…H-35, M-29…M-59, L-10…L-55**. The performance pass adds **H-36…H-40, M-60…M-70, L-56…L-66**. Section 5 and Appendix E list **every endpoint** with its access level, the roles that got through in testing, whether the dashboard uses it, any crash seen, and the issue IDs that apply. Section 7 and Appendix F list **every page** with what happened when it was opened as each role. Section 10, **Appendix I (every endpoint)** and **Appendix J (every page)** give the measured performance.
 
 ---
 
@@ -30,6 +30,11 @@
 10. **Schema contract check.** For every dashboard GET call the live backend response was validated against the dashboard's own Zod schema (198 call sites checked).
 
 **Limits.** The backend ran on SQLite, not MySQL (MySQL-only behaviour — for example case-insensitive text matching — is called out where it matters). External services (auth server, partners, Razorpay, e-mail, Redis, Celery broker) were mocked or replaced in memory. Infra (Netlify, reverse proxy rules, upload limits) is not in the repos. Test data was generated, so some page content (names, numbers) is meaningless; only errors that were confirmed in the code are reported.
+
+**Third pass — performance**
+11. **Backend performance harness.** Every GET endpoint was called as every role that could use it on a small and a large copy of the test database, with the cache cleared, recording SQL queries (with the line of code behind each repeated query), response size, rows, paging and side work. Every query was checked against the indexes in `schema.sql`. Write handlers were scanned in code for queries in loops, e-mails and outbound calls inside the request (§10.1).
+12. **Page performance crawl.** Every page was opened on the production build with mobile throttling (4× CPU, 150 ms round trip, 1.6 Mbps), recording Web Vitals, JavaScript size and unused code, API calls and their order, prefetches, DOM size and memory; search boxes were tested by typing (§10.1).
+13. **Code review of the hot spots** found by 11 and 12 (sidebar data, loaders, barrel imports, retries, leaderboards, rank, imports).
 
 ---
 
@@ -57,17 +62,22 @@ The three branches **are not ready for production together.** The second pass ra
 5. **Money records can be duplicated.** **New:** the donation verification endpoint can be replayed to create extra "paid" donations and extra tax receipts (H-29, M-44).
 6. **Deployment and data safety.** Missing DB migration scripts (C-06, H-16, first report). **New:** production runs Django's development server and nothing runs Celery beat, so none of the 10 scheduled jobs run — every college and learning circle shows 0 karma and rank 0, and events, jobs, grants and intern statuses never change on schedule (H-35, M-59). Destructive cascades on delete (H-11, M-39, L-38).
 
+7. **Speed and load (third pass, measured).**
+   - The profile API behind the sidebar reads the whole wallet table to compute rank and percentile, on every page load of every user (H-36). Public leaderboards run heavy joins and sorts with no cache — the top-100 list alone makes 301 SQL queries per call (H-37). The karma voucher import gets slower with every voucher ever made and sends one e-mail per row inside the request (H-38).
+   - 50 GET endpoints repeat the same query for every row (N+1); the worst export makes 847 queries in one call (M-60…M-63). Event, karma-log, wallet and task filters have no index in `schema.sql`, and 68 of 140 tables are not in `schema.sql` at all (M-64). 21 lists return every row with no paging (M-65).
+   - On a normal phone with slow 4G, the median dashboard page downloads 713 KB of JavaScript (65% of it unused during load), shows its main content after 7.7 s, and blocks taps for 2,034 ms (H-39). Every page also downloads a 144 KB loader GIF twice and waits for `user/info` before asking for its own data (H-40). Failing calls are sent 4 times (M-68), and the home page pre-renders dozens of other pages (M-67).
+
 ### Findings count
 
-| Severity | First report | Added in this pass | Total |
-|---|---|---|---|
-| Critical | 9 (C-01…C-09) | 1 (C-10) | **10** |
-| High | 19 (H-01…H-20, H-14 merged) | 15 (H-21…H-35) | **34** |
-| Medium | 28 (M-01…M-28) | 31 (M-29…M-59) | **59** |
-| Low | 9 (L-01…L-09) | 46 (L-10…L-55) | **55** |
-| **Total** | **65** | **93** | **158** |
+| Severity | First report | Second pass | Performance pass | Total |
+|---|---|---|---|---|
+| Critical | 9 (C-01…C-09) | 1 (C-10) | 0 | **10** |
+| High | 19 (H-01…H-20, H-14 merged) | 15 (H-21…H-35) | 5 (H-36…H-40) | **39** |
+| Medium | 28 (M-01…M-28) | 31 (M-29…M-59) | 11 (M-60…M-70) | **70** |
+| Low | 9 (L-01…L-09) | 46 (L-10…L-55) | 11 (L-56…L-66) | **66** |
+| **Total** | **65** | **93** | **27** | **185** |
 
-Plus the per-endpoint table (1,140 rows covering all 1,123 endpoints, Appendix E) and the per-page table (129 rows, Appendix F), which point every endpoint and page to its issues.
+Plus the per-endpoint tables (1,140 rows covering all 1,123 endpoints: issues in Appendix E, performance in Appendix I) and the per-page tables (129 rows: problems in Appendix F, performance in Appendix J), which point every endpoint and page to its issues.
 
 ### Automated results at a glance
 
@@ -83,6 +93,8 @@ Plus the per-endpoint table (1,140 rows covering all 1,123 endpoints, Appendix E
 | Pages with a crash, 500, role error or schema error for a role that is allowed on the page | 35 (plus 11 public pages that bounce visitors to login, H-34) |
 | Dashboard GET calls checked against live responses | 198 → 112 match, 17 schema mismatches (13 real, 4 caused by test data), 44 API errors (most from placeholder ids) |
 | `next build` / typecheck / lint / unit tests | ✅ / ✅ / ✅ (50 warnings) / ❌ 14 failing tests |
+| Performance, backend (third pass) | 358 GET endpoints measured on small and large data; 50 with N+1 queries; up to 847 queries in one call (§10.2, Appendix I) |
+| Performance, frontend (third pass) | 129 pages measured with mobile throttling; median 713 KB JavaScript per dashboard page, LCP 7.7 s, TBT 2,034 ms (§10.2, Appendix J) |
 
 ### Top 15 to fix first
 
@@ -103,6 +115,8 @@ Plus the per-endpoint table (1,140 rows covering all 1,123 endpoints, Appendix E
 | 13 | H-27, H-28 | LC invite link page; public LC APIs | Backend |
 | 14 | C-07, M-38, M-54…M-57 | One shared role list for every page and its APIs | Both |
 | 15 | H-17 | Make CI run the test suites in all three repos | All |
+
+**Top 5 performance fixes** (third pass, details in §10): H-36 (sidebar rank query on every page), H-37 (cache the public leaderboards), H-39 (remove charts and Markdown from the shared bundle), H-40 (do not block pages on `user/info`; drop the 144 KB loader GIF), M-68 (stop retrying 500s).
 
 ---
 
@@ -817,6 +831,93 @@ This item was first marked "High, needs confirmation", because the auth server w
 - **Fix.** Use `entrypoint.sh` (daphne) or gunicorn; remove the `.:/app` mount in production; add a `beat` service (`celery -A mulearnbackend.celery beat -l info`, with a persistent schedule file or `django-celery-beat`); run the two aggregate crons once by hand after deploy. See M-59 for the worker side.
 - **Impact.** Unstable API server; wrong karma/rank numbers across the dashboard; business automation silently off.
 
+#### High issues added in the performance pass
+
+### H-36 · The profile API that the sidebar loads on every page reads the whole wallet table (rank and percentile)
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Performance / Scalability |
+| Repo / branch | Backend @ `pranav-dev` (same code on `dev`) + Dashboard @ `dev` |
+| Location | Backend `api/dashboard/profile/profile_serializer.py:189-198` `UserProfileSerializer.get_percentile` and `:242-279` `get_rank` (route `GET /api/v1/dashboard/profile/user-profile/`, `UserProfileAPI`). Dashboard `src/components/dashboard/app-sidebar.tsx:44` `useUserProfile()` (stale time 5 minutes, `src/features/profile/hooks/use-profile.ts:40`) |
+| Dependency | Every dashboard page (the sidebar shows the user's name, picture and karma from this API) |
+
+- **Problem.**
+  1. `get_rank` makes a Python list of the user id of **every wallet with karma ≥ the user's karma** (`list(ranks.values_list("user_id", flat=True))`, with a join on roles and `DISTINCT`) and then looks for the user with `list.index`. For a new user (karma 0) this is every wallet in the database.
+  2. `get_percentile` counts all wallets with less karma and then counts all users — two more whole-table counts. `wallet.karma` has no index (`schema.sql`).
+  3. The API runs 18 queries per call (measured). The browser crawl shows the sidebar calls it on **every** dashboard page load, and again every 5 minutes while the user is active.
+- **Why it matters.** This is the most often called heavy query in the system, and its cost grows with the total number of users, not with anything the user did. With 300,000 wallets, a new user's page load moves up to 300,000 ids from MySQL into Python and searches them. It is likely the first thing to slow down under real traffic. The same pattern exists in `UserRankSerializer` (L-24).
+- **Expected / Current.** A light "current user" call for the sidebar, and rank from one indexed `COUNT` or a stored value / every page load reads the whole wallet table.
+- **Reproduce.** Open any dashboard page with the network tab open → `GET /dashboard/profile/user-profile/`. In the test harness this call makes 18 SQL queries; the rank query has no `LIMIT`.
+- **Fix.** (1) Sidebar: use `user/info` (already loaded by the top bar) or a new small `me` endpoint; call `user-profile` only on the profile page. (2) Rank: `Wallet.objects.filter(karma__gt=user_karma).count() + 1` with an index on `wallet(karma)`, or a rank table refreshed by a scheduled job (needs H-35). (3) Percentile: the same count, with the total user count cached.
+- **Impact.** Database CPU and memory load on every page view by every user; slow sidebar; with the single-process dev server (H-35) one slow call delays everyone.
+
+### H-37 · Public leaderboards run heavy whole-table queries with no cache (301 queries for the top 100)
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Performance / DoS |
+| Repo / branch | Backend @ `pranav-dev` |
+| Location | `api/common/common_views.py:897-907` `BekenAPI` (`GET /api/v1/public/leaderboard/top-100/`); `api/leaderboard/leaderboard_view.py:26-50` `StudentsLeaderboard`, `:69-110` `StudentsMonthlyLeaderboard`, `:127-150` `CollegeLeaderboard`; only `CollegeMonthlyLeaderboard` (`:154`) has a cache (`cache_page(300)`) |
+| Dependency | Dashboard home page ("top karma earners" card) and `/dashboard/leaderboard` (`src/features/leaderboard/api/leaderboard.api.ts:29-47`). No login needed |
+
+- **Problem.**
+  1. Top 100: one query for the users plus three queries per user (wallet, IG links, org links) = **301 queries per call** (measured), no cache, no login.
+  2. Students and colleges: one big query that joins user, org link, organization, role link, role and wallet with `DISTINCT` and sorts by `wallet.karma`. `wallet.karma` has no index, so the database builds and sorts the whole student set on every call. The college board also counts and sums every student of every college.
+  3. Students monthly: sums `karma_activity_log.karma` for last month for every student. `karma_activity_log` (the biggest table) has no index on `created_at` (`schema.sql`), so every call reads the karma log. It also checks the file system once per row for a profile picture.
+- **Why it matters.** Anyone can call these in a loop without logging in, and each call is a large join and sort. The home page calls one on every load. The results only change when karma changes.
+- **Expected / Current.** Cached or pre-computed rankings / computed from scratch on every call.
+- **Reproduce.** `GET /api/v1/public/leaderboard/top-100/` with no token → 301 SQL queries in the harness.
+- **Fix.** Cache every leaderboard for 5–15 minutes, or have a scheduled job write the top N into a small table. In `BekenAPI` add `select_related("wallet_user")` and prefetch the IG and org links. Add indexes on `wallet(karma)` and `karma_activity_log(created_at)` (or `(user_id, created_at)`). Rate-limit the public endpoints.
+- **Impact.** Database load grows with traffic on the most visited pages; an easy target for a denial-of-service attack.
+
+### H-38 · Karma voucher import gets slower with every voucher ever made, and draws an image and sends an e-mail for each row inside the request
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Performance / Reliability |
+| Repo / branch | Backend @ `pranav-dev` |
+| Location | `api/dashboard/karma_voucher/karma_voucher_view.py:38-236` `ImportVoucherLogAPI.post` (`POST /api/v1/dashboard/karma-voucher/import/`): `:113-114` `existing_codes = set(VoucherLog.objects.values_list('code', flat=True))` inside the per-row loop; `:196-229` `generate_karma_voucher(...)` and `EmailMessage(...).send()` for each voucher. The same image + e-mail in `VoucherLogAPI.post` (`:286-341`) |
+| Dependency | Dashboard karma voucher import screen |
+
+- **Problem.** (1) For each valid row the code loads the code of **every voucher ever created**. 500 rows with 50,000 existing vouchers = 25 million values read. (2) For each created voucher it draws an image (PIL) and sends an SMTP e-mail while the HTTP request waits. `EMAIL_TIMEOUT` is not set, so one slow mail server stops the whole import.
+- **Why it matters.** A normal import of a few hundred rows takes minutes and hits the proxy timeout. The admin sees an error and retries, while the first run is still sending e-mails → people get duplicate e-mails, and vouchers can be created twice.
+- **Expected / Current.** A quick import that queues the images and e-mails / quadratic reads plus N images and N e-mails in one request.
+- **Fix.** Load existing codes once before the loop (or let a unique index + retry generate codes); `bulk_create` the vouchers; send one Celery task per voucher for the image and e-mail (`mu_celery.task.send_email` already exists); set `EMAIL_TIMEOUT`.
+- **Impact.** Imports fail or time out; duplicate side effects when retried.
+
+### H-39 · Every dashboard page downloads about 713 KB of JavaScript, most of it unused, and is slow on a normal phone
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Performance (frontend) |
+| Repo / branch | Dashboard @ `dev` |
+| Location | `src/components/dashboard/app-sidebar.tsx:27` imports `useUserProfile` from the `@/features/profile` barrel (`src/features/profile/index.ts` → `components/index.ts` re-exports every profile component, including `karma-distribution.tsx`, which imports `recharts`); `src/components/dashboard/whats-new-popup.tsx:13` imports `MarkdownRenderer` (`react-markdown` + `remark-gfm` + `rehype-sanitize`) directly. Both are part of the dashboard layout (`src/app/(dashboard)/layout.tsx`), so they load on every page |
+| Dependency | All 120 dashboard pages |
+
+- **Problem.** Measured on the production build with mobile throttling (4× slower CPU, 150 ms round trip, 1.6 Mbps):
+  1. The median dashboard page downloads 40 script files, **713 KB compressed (2,435 KB unzipped)**, and **65%** of that code does not run while the page loads (V8 coverage).
+  2. The charts chunk (recharts, about 91 KB compressed / 297 KB unzipped) and the Markdown chunk (about 44 KB compressed / 143 KB unzipped) load on every dashboard page, including pages with no chart and when the "What's new" popup stays closed.
+  3. Median LCP (when the main content appears) is **7.7 s**, and median Total Blocking Time is **2,034 ms**. 123 of 129 pages have LCP over 4 s ("poor" in Core Web Vitals), and 123 pages block the main thread for more than 600 ms.
+- **Why it matters.** Many learners use phones on mobile data. On such a phone they wait 7–9 s for content, and the page does not respond to taps for about 2 s after it appears.
+- **Expected / Current.** Under about 250–300 KB of compressed first-load JavaScript per page, LCP under 2.5–4 s / the numbers above.
+- **Reproduce.** Chrome DevTools → Performance, "Slow 4G" + 4× CPU → open `/dashboard/interest-groups` → the chunk containing `recharts-wrapper` and the one containing `micromark` are loaded.
+- **Fix.** (1) Import hooks from their own files (`@/features/profile/hooks/use-profile`), not from feature barrels, in shared components; or mark packages side-effect free and use `optimizePackageImports`. (2) Load the What's-new popup with `next/dynamic` only when it will open. (3) Load chart components with `next/dynamic` (zonal, district, campus manage and URL-shortener analytics already do). (4) Add `@next/bundle-analyzer` and a size budget check to CI. (5) For the most visited pages (home, profile, IGs, learning circles), fetch the first data in server components so content does not wait for all the JavaScript.
+- **Impact.** A slow first view of every page; poor Core Web Vitals, which also hurts search ranking of public pages.
+
+### H-40 · Every page load shows a 1920×1080 GIF (downloaded twice) and waits for `user/info` before the page asks for its own data
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Performance (frontend + backend load) |
+| Repo / branch | Dashboard @ `dev` |
+| Location | `src/app/loading.tsx:1-16` (`/images/MuLoader.gif`: 144 KB, 1920×1080, `priority` + `unoptimized`, shown at 400×400); `src/app/(dashboard)/onboarding-guard.tsx:21-68` (renders `<Loader />` until `useUserInfo()` has finished, so the page and its queries are not mounted yet); app-shell calls: `src/components/dashboard/app-topbar.tsx:41` (`user/info`), `app-sidebar.tsx:44` (`profile/user-profile`, H-36), `features/mujourney/components/GameProgressBar.tsx:11` (`profile/user-level-feed`), notification bell (`notification/unread-count`, L-57) |
+| Dependency | Every dashboard page |
+
+- **Problem.**
+  1. In 101 of 129 pages, the page's own API calls started only **after** `user/info` had finished: one extra full round trip before any page data is requested. The median page has its data at **7.8 s** after navigation.
+  2. The loader GIF is 144 KB and was downloaded **twice** per page load (257 downloads in 129 page loads). That is about 288 KB on the critical path, more than all the page's API data, and on slow 4G about 1.5 s of bandwidth taken from the JavaScript.
+  3. Every full page load makes 4 app-shell API calls that run about 30 SQL queries (`user/info` 9–11, `user-profile` 17–18, `user-level-feed` 2, `unread-count` 1, depending on the role) before the page's own calls.
+- **Why it matters.** Every page is slower than it needs to be, and the backend does the shell work again on every full load and tab.
+- **Expected / Current.** Page queries start at the same time as `user/info`; a tiny loader / a sequential wait and a large GIF.
+- **Fix.** Render the page while `user/info` loads (redirect from an effect only when needed) so its queries start in parallel; replace the GIF with a CSS spinner or a small SVG/WebP (under 10 KB) and remove `priority`; merge the shell calls into one light `me` endpoint (H-36).
+- **Impact.** Slower first view of every page; extra backend load.
+
 ---
 
 ## 4. Medium and low issues
@@ -1108,6 +1209,60 @@ Format: **ID · Title** — Severity · Category · Repo @ branch · Location �
 - *Verified.* Loading the worker's app the same way the worker does registers only 9 tasks: `achievement_tasks.*` (3), `alumni_cron`, `learning_circle_aggregates_cron`, `media_content_tasks.fetch_and_attach_poster`, `org_aggregates_cron`, `task.onboard_user`, `task.send_email`. **Not registered:** `event_cron.transition_event_statuses_task`, `mentor_tasks.expire_stale_applications`, `mentor_tasks.expire_stale_grants`, `mentor_tasks.transition_mentorship_session_statuses`, `company_tasks.expire_stale_jobs`, `intern_cron.intern_daily_status_cron`, `intern_cron.intern_task_deadline_cron` — a worker would drop them as "unregistered task".
 - *Fix.* List every `mu_celery.*` module in `include=[...]` (or rename them to `tasks.py` inside an installed app) and add a start-up check that every `CELERY_BEAT_SCHEDULE` task is registered.
 
+#### Medium issues added in the performance pass
+
+**M-60 · Interest-group APIs run 5–6 queries per interest group (up to 847 queries for one export)** — Medium · Performance · Backend · `api/dashboard/ig/dash_ig_serializer.py:236` `get_media_content_links`, `:254` `get_community_partners`, `:280` `to_representation` (user lookups); `api/dashboard/ig/impact_project_serializer.py:42` `get_team`, `:46` `get_links`.
+- *Evidence (queries: small data → large data).* `GET /dashboard/ig/` 37 → 69 for one 10-row page; `/dashboard/ig/request/` 49 → 83; `/dashboard/ig/list/` 11 → 129 (every IG in one response; used by the home page; cached for 10 minutes, see M-09); `/dashboard/ig/csv/` 185 → 847; `/dashboard/ig/get/<pk>/` and `/public/ig/<pk>/` 13 → 25. Repeated queries: `SELECT … FROM user WHERE id = ?` (18 per page), media-content links and community-partner links (one each per IG), impact-project team and links (one each per project).
+- *Fix.* `prefetch_related` the media links (with the date filter in a `Prefetch`), `community_partner_links__community_partner`, and impact projects with their team users and links; fetch all lead/mentor users in one query (the list view already does this in `get_ig_list_context` — reuse it in the other views).
+- *Impact.* Slow IG admin pages and exports; slow home page whenever the cache is empty.
+
+**M-61 · Paginated lists run 1–4 extra queries for every row** — Medium · Performance · Backend. Measured on one page of 10 rows (large data); the origin of the repeated query is in brackets:
+- `dashboard/roles/` 32 (20 user lookups for `created_by`/`updated_by`; `dash_roles_serializer.py:84` `get_members` does `len(UserRoleLink.objects.filter(...))`, which loads **every member row** of the role to count it — for "Student" that is almost every user, see M-04).
+- `dashboard/affiliation/` 32 (`affiliation/serializers.py:20` org count per row), `dashboard/channels/` 22, `dashboard/category/` 22 (user lookups).
+- `dashboard/college/` 72 (5 aggregate queries per college, `college/serializer.py:40-75`).
+- `dashboard/company/jobs/` 43 (user, company and job rules per job), `company/applications/me/` 33, `company/collaborations/` 23, `company/collaborations/discover/` 12, `company/list/` 12, `company/tasks/` 16 (`task_serializers.py:126` skills per task), `company/jobs/<id>/applications/` 17.
+- `dashboard/events/admin/` 12 (`events/serializers.py:287` `get_viewer_interest_status` per event), `events/tasks/` 20, `events/manage/<id>/` 28 and `events/<id>/` 17 (`serializers.py:392` `get_linked_tasks`).
+- `dashboard/mentor/opportunities/` 21, `mentor/session/admin/list/` 12, `manage-interns/reviews/` 12, `manage-interns/reviews/timesheets/` 12, `community-partner/` 12, `muComics/comics/` 15 (`comic/serializers.py:69`), `discord-moderator/tasklist/` 22, `career-lab/hiring/` 16, `dashboard/referral/` 13 (`referral_serializer.py:19,23` wallet and level per referred user).
+- *Why it matters.* Cost = rows on the page × extra queries, and each query is a round trip to the database. Some screens ask for 1,000 rows (L-58).
+- *Fix.* `select_related("created_by", "updated_by", …)` in each list queryset; `annotate(Count(...))` instead of per-row counts; `prefetch_related` for skills, rules and links. Add tests that assert the query count of each list endpoint with 2 and 20 rows (`assertNumQueries`), so it cannot grow back.
+
+**M-62 · Exports run one or more queries per exported row** — Medium · Performance · Backend (adds to M-35). `GET /dashboard/ig/csv/` 185 → 847 queries; `/dashboard/roles/csv/` 106 → 331 (`RoleManagementCSV`: `get_members` + 2 user lookups per role); `/dashboard/karma-voucher/export/` 13 → 113 (`ExportVoucherLogAPI`, 3 lookups per voucher); `/dashboard/career-lab/hiring/csv/` 1 → 51. On top of loading everything into memory (M-35), export time grows with rows × queries per row. *Fix.* The same `select_related`/`prefetch_related` as M-60/M-61; stream with `StreamingHttpResponse` and `.iterator(chunk_size=2000)`; run large exports as a background job that sends a download link.
+
+**M-63 · The company home page recounts the whole talent pool several times per visit, and the shortlist runs 3 queries per learner** — Medium · Performance · Backend · `api/dashboard/company/analytics_views.py:169-200` `_talent_pool_payload` (used by `GET /dashboard/company/home-summary/` 34 → 61 queries and `/dashboard/company/talent-pool/analytics/` 27 → 54); `api/dashboard/company/mulearner_views.py:118-140` `CompanyTalentShortlistAPI.get` (`GET /dashboard/company/mulearners/shortlist/`, 5 → 149 queries for 24 learners).
+- *Problem.* The talent-pool summary runs one `COUNT(DISTINCT …)` over all public learners (users + settings + roles) **for each level**, plus an IG aggregate, every time any company opens its home page, with no cache. `MulearnerDirectorySerializer.get_college` (`mulearner_serializers.py:36-44`) has the comment "uses prefetch_related cache — no extra DB hit", but the view never prefetches, so it makes 3 queries per learner. The shortlist is not paginated.
+- *Fix.* One grouped query (`values("user_lvl_link_user__level").annotate(Count("id", distinct=True))`); cache the summary for 10–15 minutes (without filters it is the same for every company); `prefetch_related("user__user_organization_link_user__org")` and paginate the shortlist.
+
+**M-64 · Common filters have no database index (checked against `schema.sql`)** — Medium · Performance · Backend / Database. Every SQL query that the GET endpoints ran in the test was compared with the indexes in `schema.sql` (a dump of `mu_dev` from 2026-08-17). Appendix I marks each affected endpoint with "no index".
+- `events`: only `id`, `created_by` and `updated_by` are indexed, but every event list and calendar filters on `status`, `deleted_at`, `end_datetime`, `scope`, `scope_org_id`, `organiser_org_id`, `organiser_ig_id` → a full scan of `events` on each call (public events, campus/IG/cluster events, calendars).
+- `karma_activity_log` (the biggest table): no index on `created_at`, used by karma trend, weekly karma and the monthly leaderboards (H-37). `campus/weekly-karma/` also filters with `created_at__date=…` (`campus/serializers.py:455`), which wraps the column in a function, so no index could be used even if one existed. Use a range (`created_at >= day_start AND created_at < next_day`).
+- `wallet`: no index on `karma` (rank, percentile, leaderboards — H-36/H-37) or `karma_last_updated_at` (campus "active members").
+- `task_list`: no index on `hashtag` (intern leaderboard, achievements, launchpad and the voucher import look tasks up by hashtag), `event_id`, `approval_status`, `requested_by`, `submitted_by_company_id`.
+- 68 of the 140 tables used by the code are not in `schema.sql` at all (for example `mentor_application`, `company`, `company_jobs`, `user_job_application`, `events_interest`, `events_connection`, `mentorship_session`, `intern_*`, `media_content`, `impact_project*`). Their indexes cannot be checked; this is the missing migration scripts problem (C-06/H-16). When those scripts are written, index at least `mentor_application(user_id, status)` (43 endpoints filter on it), `company(company_user_id, status)`, `company(org_id, status)`, `company_admin_link(user_id, status)`, `company_jobs(company_id, status)`, `user_job_application(job_id, status)`, `events_interest(event_id, user_id)`, `events_connection(event_id, entity_type)`, `mentorship_session(entity_id, session_type, status)`, `impact_project(ig_id)`, `ig_media_content_link(ig_id)` and `ig_community_partner_link(ig_id)`.
+- *Fix.* Add composite indexes such as `events(status, deleted_at, end_datetime)`, `events(scope_org_id, status)`, `events(organiser_org_id, status)`, `karma_activity_log(created_at)` and `(user_id, created_at)`, `wallet(karma)`, `task_list(hashtag)`, `task_list(event_id)`; confirm each with `EXPLAIN` on a copy of production data.
+
+**M-65 · 21 list endpoints return every row, with no paging** — Medium · Performance · Backend. These endpoints returned all rows, and the count grew with the data (Appendix I, "returns every row"). The ones that will grow most in production: `dashboard/task/organization/` and `hackathon/list-organisations/` (every organization — thousands of colleges and companies), `public/list/college/`, `register/role/list/` and `dashboard/dynamic-management/roles/` (every role, including all IG roles), `dashboard/achievement/list/` (140 rows = 110 KB in the test), `launchpad/company-list/`, `launchpad/list-jobs/`, `dashboard/task/ig/`, `dashboard/events/manage/<id>/tasks/meta/` (every task), `dashboard/skill/dropdown/`, `notification/broadcast/list/all/`, `dashboard/profile/user-log/` (every karma log of a user — thousands for active users), the company templates and shortlist lists, and `public/career-lab/ongoing/` (also 2 user queries per post). The frontend pays too: the admin achievements list renders every achievement, 5,442 DOM nodes with 140 achievements in the test (Appendix J). *Fix.* Paginate them (the helper already exists), or return only `id` + `name` for dropdowns and add a server-side search box.
+
+**M-66 · Campus and college pages compute everything live on every visit** — Medium · Performance · Backend. `GET /dashboard/campus/campus-details/` 18 queries, `/campus/home-summary/` 17, `/campus/<org_id>/` 16, `/public/campus-details/<college_code>/` 19, `/campus/weekly-karma/` 9 (7 date-function queries on the karma log, M-64), `/dashboard/college/` 5 per college (M-61). `CampusDetailsSerializer` (`campus/serializers.py:246-400`, 9 method fields: lead, level, active members, total karma, rank, karma of the last 7 and 30 days, active IG count, social links) and `CampusDetailsPublicSerializer` (8 method fields) each run their own aggregate over org members and karma logs. The cached columns built for this (`organization.cached_total_karma` and friends) are never refreshed because Celery beat does not run (H-35). *Fix.* After H-35, read the cached values; compute rank and the 7/30-day karma in the scheduled job; merge the rest into one `annotate` query; cache per campus for a few minutes.
+
+**M-67 · The home page asks the server to pre-render dozens of other pages** — Medium · Performance · Dashboard · home cards (`src/features/home/components/interest-groups-card.tsx`, `learning-circles-card.tsx`, `mentor/my-igs-card.tsx`) and `src/components/ui/version-badge.tsx:10-17` (changelog link in the sidebar) use `<Link>` with the default prefetch.
+- *Problem.* On load, `/dashboard` requested **46 RSC payloads** for other pages (every IG and learning-circle card, leaderboard, projects, events, changelog). Some were requested twice with different router-state hashes, and the changelog up to 7 times. The median dashboard page makes 13 such requests. Each prefetch of a dynamic page is a server render on the Next.js server (and the layout reads `CHANGELOG.md` each time, L-63).
+- *Fix.* `prefetch={false}` on card links and on the version badge (the sidebar menu already does this, `app-sidebar.tsx:113`), or prefetch only on hover.
+- *Impact.* Wasted bandwidth on mobile and many extra server renders per home-page view.
+
+**M-68 · A failing API call is sent 4 times and the error appears about 8 s late** — Medium · Performance / UX · Dashboard · `src/app/providers.tsx:22-31` (React Query `retry`: up to 3 retries for every status ≥ 500, with the default 1 s / 2 s / 4 s back-off).
+- *Evidence (crawl).* On `/dashboard/learning-circle/[id]` and its meeting page, `learningcircle/info/<id>/` and `learningcircle/meeting/list/<id>/` each ran 4 times (at about 6.9 s, 8.7 s, 10.9 s and 15.0 s). On `/dashboard/learning-circle/invite/[link_id]`, `invite/status/<id>/` ran 4 times (H-27). The error screen came about 8 s after the first failure.
+- *Fix.* Retry at most once, and only for network errors and 502/503/504; never for 500.
+- *Impact.* Every backend 500 (Appendix G) costs 4× the load, and users wait longer to see what went wrong.
+
+**M-69 · Some search boxes send a request on every key press** — Medium · Performance · Dashboard. 60 pages have a search box. The crawl typed 6 letters into each one, 150 ms apart (normal typing speed):
+- *A request on every key press (no debounce).* `/dashboard/management/session-verification` sent **24** requests for 6 letters (it re-fetches 4 lists on each key: pending approval, scheduled, rejected and all sessions); `/dashboard/management/role-verification` and `/dashboard/management/mentor-verification` sent **18** (3 lists on each key: pending mentors, all mentors, change requests; `src/features/mentor/admin/components/mentor-verification-page.tsx`). `/dashboard/campus/manage` (campus leaderboard search, `src/features/campus-manage/components/campus-manage-dashboard.tsx`), `/dashboard/company/jobs/[jobId]` (applicant search), `/dashboard/management/manage-interns/intern-report`, `leave-reviews` and `timesheet-reviews`, and `/dashboard/weekly-twitches` (`src/features/weekly-twitches/components/office-hours-tab.tsx`) each sent 6. Every request is a backend search with `icontains` on several columns (L-61).
+- *A server round trip on every key press.* `/dashboard/search/students`, `/search/mentors`, `/search/campuses` and `/dashboard/campus/manage` made **6** Next.js RSC requests for 6 letters, because each key press rewrites the URL with `router.replace` (`src/features/search/components/StudentsSearchClient.tsx:34-39`, `MentorsSearchClient.tsx:34-39`, `CampusesSearchClient.tsx:66-78`). The API call itself on these pages is debounced (800 ms), but the URL update is not.
+- The other 47 pages behave well (one request after typing stops, or filtering in the browser). `/dashboard/search` redirects to `/dashboard/search/students` and behaves the same.
+- *Fix.* Use the existing `useDebounce` hook (300–500 ms) for every search that calls the API; update the URL from the debounced value (or with `window.history.replaceState`, which does not ask the server); on tabbed pages fetch only the visible tab.
+- *Impact.* 6–24 backend searches for one 6-letter word, each a full-table scan (L-61), and a server render per key on the search pages.
+
+**M-70 · E-mails are sent inside the request in 14 places, and SMTP has no timeout** — Medium · Performance / Reliability · Backend · `api/dashboard/lc/dash_lc_view.py:692,753` (LC invites), `api/dashboard/referral/referral_view.py:40,56`, `api/dashboard/user/dash_user_views.py:335` (user verification) and `:422` (forgot password, M-34), `api/donate/views.py:573,813` (donation receipts), `api/integrations/kkem/kkem_views.py:130`, `api/launchpad/launchpad_views.py:155,994,3203`, `api/dashboard/karma_voucher/karma_voucher_view.py:229,340` (H-38) — all through `utils.send_template_mail` or `EmailMessage.send`. Celery already has `mu_celery.task.send_email`, but these views do not use it. Each SMTP round trip (about 0.3–3 s) is added to the request, and because `EMAIL_TIMEOUT` is not set, a stuck mail server hangs the worker (with the single-process server of H-35 that blocks everyone). *Fix.* Use `send_email.delay(...)` everywhere and set `EMAIL_TIMEOUT = 10`.
+
 ### Low
 
 **L-01** · Error-log "dismiss" URL has no trailing slash (`src/api/endpoints.ts:1035`). This relies on the APPEND_SLASH 301 redirect for a PATCH (a RuntimeError when DEBUG=True). *Fix:* Add `/`.
@@ -1233,6 +1388,30 @@ Format: **ID · Title** — Severity · Category · Repo @ branch · Location �
 **L-54** · `pod1-roll.yml:58-64` syncs code with `rsync -avz --delete` from the CI checkout into the server's project folder. Anything on the server that is not in git and not excluded (for example the bind-mounted `./logs` folder of `docker-compose.pod.yml:13`) is deleted on every sync.
 
 **L-55** · `db/models.py` imports every model module "for the side effect of registering models" (its own docstring says to add new modules there) but misses `db/community_partner.py` and `db/intern.py`. Those models are only registered once something imports them (the URLconf does). Processes that do not load the URLconf (Celery worker, some management commands, schema tools) cannot resolve them early; the audit's schema build failed for exactly this reason (`no such table: community_partner`).
+
+#### Low issues added in the performance pass
+
+**L-56** · `GET /dashboard/profile/get-user-levels/` (muJourney) runs one or two task queries per level. For a user with no completed task it also reloads the karma log once per level: `UserLevelSerializer._get_completed_tasks` (`profile_serializer.py:334-343`) caches the list on the serializer, but `if getattr(self, "completed_tasks", None)` treats an empty list as "not cached" (measured: 41 → 95 queries for such a user). `GET /public/list/levels/` (`common_views.py:800-830`) also runs one task query per level. *Fix.* `if hasattr(self, "completed_tasks")`; one `TaskList` query for all levels, grouped in Python.
+
+**L-57** · The notification bell asks for `GET /notification/unread-count/` every 60 s in every open tab (`src/features/notification/hooks/use-notification.ts:39,60-66`), and the feed also polls while it is open. At 5,000 open tabs that is about 83 requests per second of polling only. The backend already has Channels/WebSockets. *Fix.* Push the count over a WebSocket, or poll every 3–5 minutes and refresh when the tab gets focus.
+
+**L-58** · Dropdowns ask for 1,000 rows at once: task types (`src/features/tasks/components/task-type/task-type-view.tsx:40`), departments (`src/features/organizations/components/departments/departments-view.tsx:40`), organizations in the verify dialog (`src/features/organizations/components/verify/verify-action-dialog.tsx:63`), interns (`src/features/intern/components/onboard-dialog.tsx:79`, `src/app/(dashboard)/dashboard/management/manage-interns/tasks/admin-tasks-client.tsx:150`). The backend endpoints are cheap per row, but the download and render cost grows with the data. *Fix.* Server-side search comboboxes.
+
+**L-59** · Write endpoints that run a query or an insert for every item (static scan; Appendix I marks each with "query inside a loop"): IG update (`dash_ig_view.py:460-471, 718-793`, `get_or_create` per lead and role), intern bulk import (`manage_interns/interns_views.py:330-359`, two lookups and a create per row), achievement bulk issue (`achievement_views.py:1136`), launchpad bulk users (`launchpad_views.py:2845-2856`), LC meeting report and verify (`dash_lc_view.py:1042, 1475-1508`), role removal (`dash_roles_views.py:411-423`), mentor unassign (`mentor_views.py:1186-1199`), project images, links and skills (`projects_view.py:69, 115, 126, 224`), comic chapter pages (`chapter_views.py:779`), task skill links (`company/task_views.py:32-33`, `mentor/task_views.py:26-27`). *Fix.* Fetch all lookups in one query before the loop; use `bulk_create`/`bulk_update`.
+
+**L-60** · Scheduled jobs update rows one at a time: `mu_celery/company_tasks.py:28`, `mentor_tasks.py:41,84`, `intern_cron.py:96-138,155`, `achievement_cron.py:64-142`, `achievement_tasks.py:107-119`, `api/management/commands/transition_mentorship_session_statuses.py:33`. This does not matter today because the jobs never run (H-35, M-59), but once beat runs they will be slow on large tables. *Fix.* `queryset.update(...)` or `bulk_update` in batches.
+
+**L-61** · Search on list endpoints uses `icontains` on several columns joined with OR (`utils/utils.py:85-90`). `LIKE '%text%'` cannot use an index, so every search reads the whole table, and the page count reads it again. The main search pages wait 800 ms after typing before searching, but some tables do not (Appendix J). *Fix.* A MySQL FULLTEXT index, or prefix search (`istartswith`) on the main columns (user name, muid, email, org title).
+
+**L-62** · Server settings that cost time on every request: no response compression in Django (no `GZipMiddleware`; JSON such as `ig/list` at 37 KB or `achievement/list` at 110 KB is sent uncompressed unless the proxy compresses it, and the proxy config is not in the repo); `CONN_MAX_AGE = 0` opens a new MySQL connection for every request; the `debug_toolbar` app and middleware are in the production settings, and `INTERNAL_IPS` includes the Docker gateway, so if `DEBUG` is ever on, every request is instrumented. `UniversalErrorHandlerMiddleware` also reads every request body into memory (H-08). *Fix.* gzip/brotli at the proxy (or `GZipMiddleware`); persistent connections with a pool; remove the debug toolbar from production settings.
+
+**L-63** · The dashboard layout reads and parses `CHANGELOG.md` from disk on every request (`src/lib/whats-new.ts:72-84`, called from `src/app/(dashboard)/layout.tsx:31-34`), including every prefetch of every dashboard page (M-67). *Fix.* Read it once at build time or at module level, or wrap it in `unstable_cache`.
+
+**L-64** · `public/favicon.ico` is 98 KB (a normal favicon is 1–15 KB), and every first visit downloads it. 16 `<img>` tags skip `next/image` (no resizing, no lazy loading): `src/components/ui/markdown-renderer.tsx`, `src/features/projects/components/project-wizard.tsx` and `project-detail-modal.tsx`, `src/features/manage-ig/components/impact-projects/*` and `edit-interest-group-form.tsx`, `src/features/courses/components/CourseCard.tsx`, `src/features/achievements/components/achievement-form-dialog.tsx`, `src/features/company-jobs/components/public-job-card.tsx` and `application-row.tsx`. *Fix.* Shrink the favicon; use `next/image` (or at least `loading="lazy"` with a width and height).
+
+**L-65** · Some pages fetch the same API twice while loading: `/dashboard/mujourney` loads `profile/user-profile/` twice — once for the sidebar (`useUserProfile`) and once in `src/features/mujourney/hooks/useInterestGroups.ts:14`, which calls `getUserProfile()` under a different query key only to read the interest groups (so the heavy H-36 query runs twice); `/dashboard/manage-events` loads `events/meta/event-type-scope/` twice; `/dashboard/manage-events/[id]` loads `user/info` twice. *Fix.* Reuse the same query key (or `select` from the cached profile) so React Query shares one request.
+
+**L-66** · The browser calls outside services at run time: the Courses page reads the Wadhwani course list from a Google Sheet through `opensheet.elk.sh`, a free public proxy (`src/api/endpoints.ts:958-959`, `src/features/courses/api/courses.api.ts:48`), and share-profile QR codes come from `quickchart.io` (`src/api/endpoints.ts:1002`). Each adds a connection to a third-party host with no service guarantee, and sends the user's IP address to it; if the service is slow or down, the feature breaks. *Fix.* Serve the sheet data from the backend with a cache, and draw QR codes in the browser (`react-qr-code` is already a dependency).
 
 ---
 
@@ -1517,6 +1696,14 @@ The full page-by-page result (component file, roles that could open it, roles re
 - **UI polish:** placeholder text "TODO" in intern task selects (L-45), duplicate sidebar labels and a typo (L-51), charts with no size (L-50), lowercase enum values in URLs (L-52), lint warnings from disabled features (L-46), dead API functions with wrong URLs (L-11).
 - **Build:** `next build` passes (123 static pages); typecheck passes; unit tests still fail (H-17).
 
+### 7.3 Frontend performance (third pass, measured)
+
+- **JavaScript weight:** H-39 — charts and Markdown libraries on every page through a barrel import and the What's-new popup; median 713 KB compressed per page, 65% unused during load.
+- **Loading sequence:** H-40 — the full-screen GIF loader (144 KB, downloaded twice) and the wait for `user/info` before the page's own requests.
+- **Network behaviour:** M-67 (dozens of prefetches from the home page), M-68 (failed calls sent 4 times), M-69 (search boxes that send a request per key), L-57 (notification polling), L-58 (1,000-row dropdowns).
+- **Assets and extra calls:** L-64 (98 KB favicon, `<img>` without lazy loading), L-65 (the same API loaded twice on some pages), L-66 (third-party services called from the browser).
+- **Per page:** Appendix J lists every page with its JavaScript, unused code, API calls, sequential rounds, data-ready time, FCP/LCP, blocking time, CLS, DOM size, heap and prefetches.
+
 ---
 
 ## 8. Backend audit (mulearnbackend @ pranav-dev)
@@ -1584,6 +1771,14 @@ The full page-by-page result (component file, roles that could open it, roles re
 - Outbound HTTP without timeouts (M-51).
 - WebSockets without authentication or rate limits (M-40, M-41).
 - Static analysis: undefined names in dead modules, unused variables that hide logic mistakes (L-44).
+
+**Backend performance (third pass, measured)**
+- Whole-table work on hot paths: H-36 (rank on every page load), H-37 (public leaderboards), M-63 (company talent pool), M-66 (campus pages).
+- Queries per row (N+1): M-60 (interest groups), M-61 (25 paginated lists), M-62 (exports), L-56 (levels).
+- Missing indexes and unknown schema: M-64. Unbounded lists: M-65.
+- Work inside the request that belongs in a background job: H-38 (voucher import), M-70 (e-mails), L-59 (loops in bulk writes), L-60 (row-by-row scheduled jobs).
+- Server settings: L-62 (no compression, a new DB connection per request, debug toolbar in production settings).
+- Every endpoint's numbers are in Appendix I.
 
 ### 8b. Auth server audit (authserver @ dev)
 
@@ -1668,9 +1863,98 @@ Other notes added in the second pass:
 
 ## 10. Performance and scalability
 
+### 10.1 How performance was measured (third pass)
+
+- **Backend, every GET endpoint.** All 506 GET routes were called as every role that could use them, on two copies of the test database: *small* (the functional-test data: about 3 rows per table plus the scenario) and *large* (plus 40 complete student profiles in one college and interest group, 10 more colleges, 6 more interest groups, about 25 more rows in every table, and 30 karma logs and notifications for one student). For each call the harness recorded the SQL queries (count, repeated query shapes and the line of code that ran them), response size, rows, paging, outbound HTTP, e-mails and cache use. The cache was cleared before every call, so the numbers are for a cold cache, and the role with the most queries is reported. 358 routes gave a successful response and were measured; the others need data or ids the test database does not have ("not measured" in Appendix I). A query count that grows with the data means one query per row (N+1). Every query was also checked against the indexes in `schema.sql`.
+- **Backend, write endpoints (629 route/method pairs).** These need real request bodies, so they were not load-tested. The code of every handler was scanned for queries inside loops, e-mails, outbound HTTP and file building inside the request.
+- **Frontend, every page.** All 129 pages were opened once on the production build (`next build` + `next start`) with a cold cache, as the role each page is for, with Lighthouse-style mobile throttling: CPU 4× slower, 150 ms round trip, 1.6 Mbps down / 750 kbps up. Recorded: FCP, LCP, CLS, long tasks (→ Total Blocking Time), JavaScript downloaded and unused (V8 coverage), API calls during load (duplicates, sequential rounds, time until the data is ready), Next.js prefetches, DOM size, JS heap, and API calls repeated after the page settled. Pages with a search box were also tested by typing 6 letters.
+- **Limits.** SQLite, not MySQL: query counts and shapes are exact, but backend timings are not production timings, so this section uses counts, sizes and index checks, not backend milliseconds. Browser timings come from a local server and a simulated network: use them to compare pages and to find the causes, not as field data.
+
+### 10.2 Results at a glance
+
+| Check | Result |
+|---|---|
+| GET endpoints measured | 358 of 506 |
+| SQL queries per GET call (large data) | median 2, 90th percentile 17, maximum 847 (`dashboard/ig/csv/`) |
+| Endpoints with the same query repeated ≥ 5 times in one call (N+1) | 50 |
+| Endpoints whose query count grew by ≥ 10 on the large data | 32 |
+| Endpoints with ≥ 50 queries on the large data | 15 |
+| Lists that return every row (no paging) | 21 (M-65) |
+| Endpoint rows that filter on a column with no index | 53 (M-64) |
+| Tables with unknown indexes (not in `schema.sql`) | 68 of 140 (M-64, C-06/H-16) |
+| Write handlers with a query/insert inside a loop | 23 route/method rows (L-59) |
+| Handlers that send e-mail inside the request | 17 route/method rows (M-70) |
+| Dashboard pages measured | 120 (+ 9 auth/public pages) |
+| JavaScript per dashboard page (median) | 40 files, 713 KB compressed (2,435 KB unzipped); 65% not run during load (H-39) |
+| FCP / LCP (median, mobile throttling) | 1.6 s / 7.7 s; 123 pages have LCP over 4 s (H-39, H-40) |
+| Total Blocking Time (median) | 2,034 ms; 123 pages over 600 ms (H-39) |
+| API calls during load (median) | 6 calls in 2 sequential rounds; data ready at 7.8 s |
+| Pages whose own data waits for `user/info` | 101 (H-40) |
+| Next.js prefetches on load (median) | 13 (home page: 46) (M-67) |
+| Pages where a failing call was retried 3 more times | 5 (M-68) |
+
+### 10.3 The 20 GET endpoints with the most SQL queries (large data)
+
+| Endpoint | Queries (small → large data) | Most repeated query | Rows | Issue |
+|---|---|---|---|---|
+| `dashboard/ig/csv/` | 185 → 847 | 180× `user` | — | M-60, M-62 |
+| `dashboard/roles/csv/` | 106 → 331 | 220× `user` | — | M-61, M-62 |
+| `public/leaderboard/top-100/` | 301 → 301 | 100× `wallet` | 100 | H-37 |
+| `dashboard/company/mulearners/shortlist/` | 5 → 149 | 72× `user_organization_link` | 24 | M-63 |
+| `dashboard/ig/list/` | 11 → 129 | 51× `user` | 7 | M-60 |
+| `dashboard/karma-voucher/export/` | 13 → 113 | 84× `user` | — | M-62 |
+| `dashboard/profile/get-user-levels/` | 41 → 95 | 47× `karma_activity_log` | 47 | L-56 |
+| `dashboard/ig/request/` | 49 → 83 | 18× `user` | 10 (paged) | M-60 |
+| `dashboard/college/` | 23 → 72 | 10× `user_organization_link` | 10 (paged) | M-61, M-66 |
+| `dashboard/ig/` | 37 → 69 | 18× `user` | 10 (paged) | M-60 |
+| `dashboard/company/home-summary/` | 34 → 61 | 47× `user` | 47 | M-63 |
+| `dashboard/company/talent-pool/analytics/` | 27 → 54 | 47× `user` | 47 | M-63 |
+| `dashboard/profile/get-user-levels/<str:muid>/` | 43 → 51 | 26× `task_list` | 47 | L-56 |
+| `dashboard/career-lab/hiring/csv/` | 1 → 51 | 50× `user` | — | M-62 |
+| `public/career-lab/ongoing/` | 1 → 51 | 50× `user` | 28 | M-65 |
+| `public/list/levels/` | 21 → 48 | 47× `task_list` | 47 | L-56 |
+| `dashboard/company/jobs/` | 6 → 43 | 20× `user` | 10 (paged) | M-61 |
+| `dashboard/company/applications/me/` | 1 → 33 | 10× `company_jobs` | 10 (paged) | M-61 |
+| `dashboard/roles/` | 32 → 32 | 20× `user` | 10 (paged) | M-61 |
+| `dashboard/affiliation/` | 11 → 32 | 20× `user` | 10 (paged) | M-61 |
+
+### 10.4 The 10 slowest dashboard pages (largest contentful paint, mobile throttling)
+
+| Page | LCP | TBT | JS (compressed) | API calls on load | Sequential API rounds | Data ready at |
+|---|---|---|---|---|---|---|
+| `/dashboard/mentor` | 9.0 s | 2464 ms | 832 KB | 9 | 2 | 9.0 s |
+| `/dashboard/mentor/opportunities` | 8.9 s | 2219 ms | 832 KB | 9 | 2 | 8.7 s |
+| `/dashboard/profile` | 8.9 s | 2359 ms | 780 KB | 12 | 3 | 9.3 s |
+| `/dashboard` | 8.4 s | 2067 ms | 832 KB | 9 | 2 | 8.7 s |
+| `/dashboard/management/manage-interest-groups` | 8.2 s | 2356 ms | 763 KB | 6 | 2 | 8.3 s |
+| `/dashboard/management/manage-interns/tasks` | 8.1 s | 2490 ms | 722 KB | 8 | 2 | 8.3 s |
+| `/dashboard/management/organizations/affiliation` | 8.1 s | 2297 ms | 717 KB | 5 | 2 | 8.0 s |
+| `/dashboard/mentor/sessions` | 8.1 s | 2285 ms | 713 KB | 8 | 2 | 8.0 s |
+| `/dashboard/campus/manage` | 8.1 s | 2933 ms | 751 KB | 15 | 3 | 9.0 s |
+| `/dashboard/management/tasks/create` | 8.1 s | 3394 ms | 715 KB | 11 | 2 | 8.6 s |
+
+### 10.5 The 10 dashboard pages with the most main-thread blocking
+
+| Page | TBT | JS (compressed) | JS unused on load | DOM nodes |
+|---|---|---|---|---|
+| `/dashboard/management/tasks/create` | 3394 ms | 715 KB | 64% | 1114 |
+| `/dashboard/management/manage-achievements/list` | 3072 ms | 696 KB | 65% | 5442 |
+| `/dashboard/campus/manage` | 2933 ms | 751 KB | 60% | 1293 |
+| `/dashboard/management/manage-achievements/logs` | 2526 ms | 699 KB | 65% | 3813 |
+| `/dashboard/management/manage-interns/tasks` | 2490 ms | 722 KB | 65% | 1158 |
+| `/dashboard/talent-pool` | 2473 ms | 742 KB | 66% | 1390 |
+| `/dashboard/mentor` | 2464 ms | 832 KB | 68% | 851 |
+| `/dashboard/company/jobs/[jobId]` | 2444 ms | 740 KB | 66% | 1203 |
+| `/dashboard/management/organizations/verify` | 2427 ms | 788 KB | 67% | 836 |
+| `/dashboard/management/session-verification` | 2378 ms | 706 KB | 64% | 870 |
+
+Every endpoint is in Appendix I and every page in Appendix J. The performance issues are H-36…H-40 (§3), M-60…M-70 (§4) and L-56…L-66 (§4).
+
+### 10.6 Earlier findings (first and second pass)
+
 | Area | Problem | Suggestion |
 |---|---|---|
-| Roles list | `len(queryset)` per role; members sort JOIN (M-04) | `annotate(Count)` |
+| Roles list | `len(queryset)` per role; members sort JOIN (M-04, M-61) | `annotate(Count)` |
 | Mentor list | Loads every pending application into Python to find change requests | Use `Exists()` / a subquery |
 | Events | The dashboard fetches 3×200 events per "Pending" view and all published events for "Ongoing/Completed" (M-11) | Server `status__in`, time-based status |
 | Uploads | The middleware reads every request body into memory (H-08) | Drop it; stream uploads |
@@ -1682,7 +1966,7 @@ Other notes added in the second pass:
 | Logging | DEBUG root logger to disk, no rotation | Rotate; INFO level |
 | Public WebSocket | 6 full-table aggregates per anonymous connection; signal handlers run `COUNT(*)` inside requests (M-41) | Cache stats; move work to Celery |
 | CSV exports | Whole tables serialized in one request (M-35) | Stream or generate in the background |
-| Profile rank | Loads every wallet id above the user's karma into Python (L-24) | Window function or cached rank |
+| Profile rank | Loads every wallet id above the user's karma into Python (L-24; the same pattern runs on every page load through the sidebar — H-36) | Window function or cached rank |
 | Outbound calls | 19 of 25 `requests` calls have no timeout (M-51) | Shared session with timeouts |
 | Dev server in production | `runserver` + no timeouts = slow partner calls block users (H-35) | daphne/gunicorn with workers and timeouts |
 | Cached aggregates | Org/LC karma and rank columns are never refreshed because beat does not run (H-35, M-59) | Run beat; refresh once after deploy |
@@ -1853,6 +2137,25 @@ These are cases where each repo looks fine alone but the pair is broken.
 - Add contract tests: for each dashboard API function, validate a recorded backend response against its Zod schema in CI (the checker used for §5.6 can be reused).
 - Add the browser crawl used for §7 to CI as a smoke test (open every page as each role and fail on page errors or 5xx).
 
+**Performance additions to the plan (third pass)**
+
+**P1 — this sprint (biggest load and speed wins)**
+- H-36: stop calling `profile/user-profile/` from the sidebar; compute rank with one indexed count (or a stored rank); add `wallet(karma)` index.
+- H-37: cache all leaderboards (or pre-compute them in a job) and prefetch in `BekenAPI`; rate-limit public endpoints.
+- H-38: move voucher images and e-mails to Celery; load existing codes once.
+- H-39: remove the profile barrel import from the sidebar and load the What's-new Markdown renderer and charts with `next/dynamic`; add a bundle-size budget to CI.
+- H-40: render pages while `user/info` loads; replace the 144 KB GIF with a CSS/SVG spinner.
+- M-68: stop retrying 500 responses.
+
+**P2 — next sprint**
+- M-60…M-63, M-66: `select_related`/`prefetch_related`/`annotate` on the listed endpoints, plus `assertNumQueries` tests for every list endpoint.
+- M-64: add the listed indexes and write index-bearing migration scripts for the 68 tables missing from `schema.sql` (with C-06/H-16).
+- M-65: paginate the 21 unbounded lists; M-67: turn off default prefetch on card links; M-69: debounce search and stop rewriting the URL on each key; M-70: e-mails through Celery with `EMAIL_TIMEOUT`.
+
+**P3 — clean-up**
+- L-56…L-66.
+- Keep the performance harness (§10.1) in CI: fail a build when an endpoint's query count grows between the small and the large test data, or when a page's first-load JavaScript grows over the budget.
+
 ---
 
 ## 15. Final production-readiness assessment
@@ -1891,6 +2194,18 @@ These are cases where each repo looks fine alone but the pair is broken.
 | Deployment | ❌ Development server in production; no Celery beat; 6 scheduled tasks unregistered; broken roll-out workflow (H-35, M-59, L-53, L-54) |
 
 Add to the release gate: the browser crawl (§7) shows **no page errors and no 5xx** for any role on the pages that role can open, and the schema contract check (§5.6) shows **no mismatches**.
+
+**Third-pass update (performance).** The measured performance adds these release blockers:
+
+| Area | Status after the third pass |
+|---|---|
+| Backend load per page view | ❌ Every page load runs a whole-table rank query (H-36) and about 30 SQL queries for the app shell (H-40) |
+| Public endpoints | ❌ Uncached heavy leaderboards, 301 queries for the top-100 list, no rate limit (H-37) |
+| Query efficiency | ⚠️ 50 endpoints with N+1 queries; exports up to 847 queries (M-60…M-63) |
+| Database indexes | ❌ Missing for events, karma-log dates, wallet karma, task hashtags; unknown for 68 tables (M-64) |
+| Frontend speed (mid-range phone, slow 4G) | ❌ Median LCP 7.7 s, TBT 2,034 ms; 713 KB JavaScript per page, 65% unused (H-39, H-40) |
+
+Add to the release gate: no list endpoint grows its query count with more data (§10.1 harness in CI), every public endpoint is cached or rate-limited, and on a mid-range phone profile (4× CPU, slow 4G) the home, profile, interest-group and learning-circle pages have LCP under 4 s and TBT under 600 ms.
 
 ---
 
@@ -3713,3 +4028,1295 @@ These return 500 instead of 405. Most are never called by the dashboard; they sh
 | POST | `/api/v1/url-shortener/edit/<str:url_id>/` | TypeError: UrlShortenerAPI.post() got an unexpected keyword argument 'url_id' |
 | DELETE | `/api/v1/url-shortener/list/` | TypeError: UrlShortenerAPI.delete() missing 1 required positional argument: 'url_id' |
 | PUT | `/api/v1/url-shortener/list/` | TypeError: UrlShortenerAPI.put() missing 1 required positional argument: 'url_id' |
+
+## Appendix I — Performance of every backend endpoint (1,140 rows)
+
+How to read it:
+- **SQL queries (small → large data):** SQL queries for one call on the small and on the large test database (§10.1), for the role that made the most queries. A big jump means one or more queries per row (N+1).
+- **Most repeated query:** how many times the same query shape ran in one call, and on which table (shown when 3 or more).
+- **Rows:** the longest list in the response on the large data ("paged" = the response has pagination).
+- **Other performance notes:** measured findings (no index, returns every row, outbound HTTP, cached response) and the static code scan (query inside a loop, e-mail in the request, spreadsheet building, and SerializerMethodFields that run a query per row). For write methods the static scan is the only data.
+- **Not measured:** no role got a successful response with the test data (usually no matching object for the id in the URL, or a crash listed in Appendix G/H).
+
+| # | Method | Endpoint (`/api/v1/` prefix removed) | Measured as | SQL queries (small → large data) | Most repeated query | Rows (large data) | Size (large data) | Other performance notes | Issues |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | POST | `auth/user-authentication/` | — | write (not load-tested) | — | — | — | outbound HTTP in the request (api/auth/auth_views.py:152) | — |
+| 2 | POST | `auth/google-mobile/` | — | write (not load-tested) | — | — | — | outbound HTTP in the request (api/auth/auth_views.py:38) | — |
+| 3 | POST | `auth/apple-mobile/` | — | write (not load-tested) | — | — | — | outbound HTTP in the request (api/auth/auth_views.py:97) | — |
+| 4 | POST | `auth/refresh-token/` | — | write (not load-tested) | — | — | — | outbound HTTP in the request (api/auth/auth_views.py:206) | — |
+| 5 | POST | `register/` | — | write (not load-tested) | — | — | — | — | — |
+| 6 | GET | `register/role/list/` | Admin | 1 → 1 | — | 110 | 12.6 KB | response cached; returns every row (no paging) | M-65 |
+| 7 | GET | `register/colleges/` | Admin | 1 → 1 | — | 11 | 0.8 KB | response cached | — |
+| 8 | GET | `register/department/list/` | Admin | 1 → 1 | — | 28 | 4.4 KB | response cached | — |
+| 9 | GET | `register/location/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 10 | GET | `register/country/list/` | Admin | 1 → 1 | — | 245 | 31.4 KB | response cached | — |
+| 11 | POST | `register/state/list/` | — | write (not load-tested) | — | — | — | — | — |
+| 12 | POST | `register/district/list/` | — | write (not load-tested) | — | — | — | — | — |
+| 13 | POST | `register/college/list/` | — | write (not load-tested) | — | — | — | — | — |
+| 14 | GET | `register/company/list/` | Admin | 1 → 1 | — | 1 | 0.1 KB | response cached | — |
+| 15 | GET | `register/community/list/` | Admin | 1 → 1 | — | 0 | 0.1 KB | response cached | — |
+| 16 | POST | `register/schools/list/` | — | write (not load-tested) | — | — | — | — | — |
+| 17 | GET | `register/area-of-interest/list/` | Admin | 1 → 1 | — | 7 | 0.6 KB | response cached | — |
+| 18 | POST | `register/lc/user-validation/` | — | write (not load-tested) | — | — | — | — | — |
+| 19 | POST | `register/email-verification/` | — | write (not load-tested) | — | — | — | — | — |
+| 20 | GET | `register/user-country/` | Admin | 1 → 1 | — | 245 | 22.8 KB | response cached | — |
+| 21 | GET | `register/user-state/` | Admin | 1 → 1 | — | — | 0.1 KB | — | — |
+| 22 | GET | `register/user-zone/` | Admin | 1 → 1 | — | — | 0.1 KB | — | — |
+| 23 | POST | `register/select-domains/` | — | write (not load-tested) | — | — | — | — | — |
+| 24 | POST | `register/select-endgoals/` | — | write (not load-tested) | — | — | — | — | — |
+| 25 | GET | `register/connect-discord/` | — | not measured (no successful response in test data; 400) | — | — | — | outbound HTTP in the request (api/register/register_views.py:54) | — |
+| 26 | POST | `register/organization/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 27 | GET | `leaderboard/students/` | Anonymous | 1 → 2 | — | 20 | 2.3 KB | — | H-37 |
+| 28 | GET | `leaderboard/students-monthly/` | Anonymous | 1 → 1 | — | 20 | 2.4 KB | — | H-37 |
+| 29 | GET | `leaderboard/college/` | Anonymous | 1 → 1 | — | 11 | 1.4 KB | — | H-37 |
+| 30 | GET | `leaderboard/college-monthly/` | Anonymous | 1 → 1 | — | 11 | 1.1 KB | response cached; no index: karma_activity_log(created_at) | H-37, M-64 |
+| 31 | GET | `leaderboard/wadhwani-college/` | Anonymous | 1 → 1 | — | 0 | 0.1 KB | no index: task_list(hashtag) | M-64 |
+| 32 | GET | `leaderboard/wadhwani-zonal/` | Anonymous | 1 → 1 | — | 0 | 0.1 KB | no index: task_list(hashtag) | M-64 |
+| 33 | GET | `leaderboard/ig-mentor/<str:ig_id>/` | Admin | 2 → 2 | — | 1 | 0.2 KB | — | — |
+| 34 | GET | `leaderboard/campus-mentor/<str:campus_id>/` | Admin | 2 → 2 | — | 1 | 0.2 KB | — | — |
+| 35 | GET | `leaderboard/company-mentor/<str:company_id>/` | Admin | 2 → 2 | — | 1 | 0.2 KB | — | — |
+| 36 | GET | `dashboard/calendar/events/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 37 | GET | `dashboard/home/learner/summary/` | Discord Mod | 8 → 8 | — | — | 0.3 KB | no index: circle_meeting_log(meet_time); no index: wallet(karma) | M-64 |
+| 38 | GET | `dashboard/home/learner/streak/` | Discord Mod | 2 → 2 | — | 1 | 0.2 KB | — | — |
+| 39 | GET | `dashboard/user/preferences/` | Admin | 1 → 1 | — | — | 0.1 KB | — | — |
+| 40 | PATCH | `dashboard/user/preferences/` | — | write (not load-tested) | — | — | — | — | — |
+| 41 | GET | `dashboard/user/search/` | Admin | 5 → 5 | — | 10 (paged) | 4.4 KB | — | — |
+| 42 | GET | `dashboard/user/verification/` | Admin | 6 → 9 | — | 10 (paged) | 11.3 KB | per-row method fields: UserVerificationSerializer: role_profile | — |
+| 43 | PATCH | `dashboard/user/verification/` | — | write (not load-tested) | — | — | — | sends e-mail in the request (api/dashboard/user/dash_user_views.py:335) | M-70 |
+| 44 | DELETE | `dashboard/user/verification/` | — | write (not load-tested) | — | — | — | — | — |
+| 45 | GET | `dashboard/user/verification/csv/` | Admin | 5 → 8 | — | — | 5.5 KB | per-row method fields: UserVerificationSerializer: role_profile | — |
+| 46 | GET | `dashboard/user/verification/<str:link_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: UserVerificationSerializer: role_profile | — |
+| 47 | PATCH | `dashboard/user/verification/<str:link_id>/` | — | write (not load-tested) | — | — | — | sends e-mail in the request (api/dashboard/user/dash_user_views.py:335) | M-70 |
+| 48 | DELETE | `dashboard/user/verification/<str:link_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 49 | GET | `dashboard/user/verification/<str:link_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: UserVerificationSerializer: role_profile | — |
+| 50 | PATCH | `dashboard/user/verification/<str:link_id>/` | — | write (not load-tested) | — | — | — | sends e-mail in the request (api/dashboard/user/dash_user_views.py:335) | M-70 |
+| 51 | DELETE | `dashboard/user/verification/<str:link_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 52 | GET | `dashboard/user/organization/` | Admin | 2 → 2 | — | 1 | 0.2 KB | — | — |
+| 53 | POST | `dashboard/user/organization/` | — | write (not load-tested) | — | — | — | — | — |
+| 54 | GET | `dashboard/user/organization/list/` | Admin | 2 → 2 | — | 1 | 0.2 KB | — | — |
+| 55 | POST | `dashboard/user/organization/list/` | — | write (not load-tested) | — | — | — | — | — |
+| 56 | GET | `dashboard/user/info/` | Company | 11 → 11 | — | 1 | 0.4 KB | — | H-40 |
+| 57 | POST | `dashboard/user/forgot-password/` | — | write (not load-tested) | — | — | — | sends e-mail in the request (api/dashboard/user/dash_user_views.py:422) | M-70 |
+| 58 | POST | `dashboard/user/reset-password/verify-token/<str:token>/` | — | write (not load-tested) | — | — | — | — | — |
+| 59 | POST | `dashboard/user/reset-password/<str:token>/` | — | write (not load-tested) | — | — | — | — | — |
+| 60 | POST | `dashboard/user/profile/update/` | — | write (not load-tested) | — | — | — | — | — |
+| 61 | PATCH | `dashboard/user/profile/update/` | — | write (not load-tested) | — | — | — | — | — |
+| 62 | GET | `dashboard/user/csv/` | Admin | 1 → 1 | — | — | 1173.2 KB | — | — |
+| 63 | GET | `dashboard/user/` | Admin | 2 → 2 | — | 10 (paged) | 4.6 KB | — | — |
+| 64 | GET | `dashboard/user/<str:user_id>/` | Admin | 6 → 6 | — | 1 | 0.6 KB | — | — |
+| 65 | PATCH | `dashboard/user/<str:user_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 66 | DELETE | `dashboard/user/<str:user_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 67 | GET | `dashboard/user/<str:user_id>/` | Admin | 6 → 6 | — | 1 | 0.6 KB | — | — |
+| 68 | PATCH | `dashboard/user/<str:user_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 69 | DELETE | `dashboard/user/<str:user_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 70 | GET | `dashboard/user/<str:user_id>/` | Admin | 6 → 6 | — | 1 | 0.6 KB | — | — |
+| 71 | PATCH | `dashboard/user/<str:user_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 72 | DELETE | `dashboard/user/<str:user_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 73 | GET | `dashboard/zonal/zonal-details/` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: ZonalDetailsSerializer: rank, karma, total_members, active_members | — |
+| 74 | GET | `dashboard/zonal/top-districts/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 75 | GET | `dashboard/zonal/student-level/` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: ZonalStudentLevelStatusSerializer: students_count | — |
+| 76 | GET | `dashboard/zonal/student-details/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 77 | GET | `dashboard/zonal/student-details/csv/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 78 | GET | `dashboard/zonal/college-details/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 79 | GET | `dashboard/zonal/college-details/csv/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 80 | GET | `dashboard/district/district-details/` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: DistrictDetailsSerializer: rank, district_lead, karma, total_members | — |
+| 81 | GET | `dashboard/district/top-campus/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 82 | GET | `dashboard/district/student-level/` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: DistrictStudentLevelStatusSerializer: students_count | — |
+| 83 | GET | `dashboard/district/student-details/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 84 | GET | `dashboard/district/student-details/csv/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 85 | GET | `dashboard/district/college-details/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 86 | GET | `dashboard/district/college-details/csv/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 87 | GET | `dashboard/campus/home-summary/` | Admin | 17 → 17 | — | 5 | 1.8 KB | no index: karma_activity_log(created_at); no index: wallet(karma_last_updated_at) | M-66, M-64 |
+| 88 | GET | `dashboard/campus/member-funnel/` | Admin | 7 → 7 | — | 5 | 0.5 KB | no index: wallet(karma_last_updated_at) | M-66, M-64 |
+| 89 | GET | `dashboard/campus/circle-health/` | Admin | 5 → 5 | — | 1 | 0.4 KB | — | — |
+| 90 | GET | `dashboard/campus/recent-activity/` | Admin | 3 → 3 | — | 1 | 0.5 KB | — | — |
+| 91 | GET | `dashboard/campus/campus-list/` | Admin | 2 → 2 | — | 10 (paged) | 1.0 KB | — | — |
+| 92 | GET | `dashboard/campus/campus-details/` | Mentor | 18 → 18 | — | 2 | 0.8 KB | per-row method fields: CampusDetailsSerializer: lead, campus_level, active_members, total_karma | M-66 |
+| 93 | GET | `dashboard/campus/student-level/` | Admin | 3 → 3 | — | 47 | 1.6 KB | — | M-66 |
+| 94 | GET | `dashboard/campus/student-level/<str:org_id>/` | Admin | 2 → 2 | — | 47 | 1.6 KB | — | M-66 |
+| 95 | GET | `dashboard/campus/student-details/` | Mentor | 8 → 8 | — | 10 (paged) | 2.9 KB | — | — |
+| 96 | GET | `dashboard/campus/student-details/csv/` | Mentor | 7 → 7 | — | — | 1.6 KB | — | — |
+| 97 | GET | `dashboard/campus/weekly-karma/` | Admin | 9 → 9 | 7× `karma_activity_log` | — | 0.2 KB | index unusable: karma_activity_log(django_datetime_cast_date(created_at)) | M-66, M-64 |
+| 98 | GET | `dashboard/campus/weekly-karma/<str:org_id>/` | Admin | 8 → 8 | 7× `karma_activity_log` | — | 0.2 KB | index unusable: karma_activity_log(django_datetime_cast_date(created_at)) | M-66, M-64 |
+| 99 | PATCH | `dashboard/campus/change-student-type/<str:member_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 100 | POST | `dashboard/campus/transfer-lead-role/` | — | write (not load-tested) | — | — | — | — | — |
+| 101 | POST | `dashboard/campus/transfer-enabler-role/` | — | write (not load-tested) | — | — | — | — | — |
+| 102 | GET | `dashboard/campus/transfer-ig-role/` | Campus Lead | 3 → 3 | — | 1 | 0.1 KB | — | — |
+| 103 | POST | `dashboard/campus/transfer-ig-role/` | — | write (not load-tested) | — | — | — | — | — |
+| 104 | GET | `dashboard/campus/events/` | Mentor | 7 → 7 | — | 1 (paged) | 0.5 KB | no index: events(deleted_at,scope,scope_org_id,status) | M-64 |
+| 105 | GET | `dashboard/campus/events/distribution/` | Mentor | 6 → 6 | — | 0 | 0.1 KB | no index: events(deleted_at,scope,scope_org_id) | M-64 |
+| 106 | GET | `dashboard/campus/execom/` | Mentor | 6 → 6 | — | 0 | 0.1 KB | — | — |
+| 107 | POST | `dashboard/campus/execom/` | — | write (not load-tested) | — | — | — | — | — |
+| 108 | DELETE | `dashboard/campus/execom/` | — | write (not load-tested) | — | — | — | — | — |
+| 109 | GET | `dashboard/campus/execom/roles/` | Mentor | 7 → 7 | — | 32 | 2.3 KB | — | — |
+| 110 | POST | `dashboard/campus/execom/roles/` | — | write (not load-tested) | — | — | — | — | — |
+| 111 | GET | `dashboard/campus/execom/search/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 112 | GET | `dashboard/campus/execom/<str:member_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 113 | POST | `dashboard/campus/execom/<str:member_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 114 | DELETE | `dashboard/campus/execom/<str:member_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 115 | GET | `dashboard/campus/ig-chapters/` | Mentor | 8 → 12 | 5× `organization` | 3 | 1.0 KB | per-row method fields: CampusIGChapterListSerializer: campus_ig_member_count | — |
+| 116 | POST | `dashboard/campus/ig-chapters/` | — | write (not load-tested) | — | — | — | — | — |
+| 117 | PATCH | `dashboard/campus/ig-chapters/` | — | write (not load-tested) | — | — | — | — | — |
+| 118 | DELETE | `dashboard/campus/ig-chapters/` | — | write (not load-tested) | — | — | — | — | — |
+| 119 | GET | `dashboard/campus/ig-chapters/<str:chapter_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: CampusIGChapterListSerializer: campus_ig_member_count | — |
+| 120 | POST | `dashboard/campus/ig-chapters/<str:chapter_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 121 | PATCH | `dashboard/campus/ig-chapters/<str:chapter_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 122 | DELETE | `dashboard/campus/ig-chapters/<str:chapter_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 123 | POST | `dashboard/campus/ig-chapters/<str:chapter_id>/join/` | — | write (not load-tested) | — | — | — | — | — |
+| 124 | DELETE | `dashboard/campus/ig-chapters/<str:chapter_id>/leave/` | — | write (not load-tested) | — | — | — | — | — |
+| 125 | PUT | `dashboard/campus/social-links/` | — | write (not load-tested) | — | — | — | — | — |
+| 126 | DELETE | `dashboard/campus/social-links/` | — | write (not load-tested) | — | — | — | — | — |
+| 127 | PUT | `dashboard/campus/social-links/<str:link_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 128 | DELETE | `dashboard/campus/social-links/<str:link_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 129 | GET | `dashboard/campus/student-list/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 130 | GET | `dashboard/campus/students/<str:muid>/activity/` | Mentor | 7 → 8 | — | 10 (paged) | 2.3 KB | — | — |
+| 131 | GET | `dashboard/campus/igs/` | Mentor | 7 → 7 | — | 7 (paged) | 1.2 KB | no index: user_ig_link(assignment_type) | M-64 |
+| 132 | GET | `dashboard/campus/igs/<str:ig_id>/members/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 133 | GET | `dashboard/campus/learning-circles/` | Mentor | 8 → 8 | — | 1 (paged) | 0.3 KB | — | — |
+| 134 | GET | `dashboard/campus/learning-circles/<str:circle_id>/members/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 135 | GET | `dashboard/campus/analytics/karma-trend/` | Mentor | 6 → 6 | — | 1 | 0.1 KB | response cached; no index: karma_activity_log(created_at) | M-66, M-64 |
+| 136 | GET | `dashboard/campus/analytics/growth/` | Mentor | 9 → 9 | — | 2 | 0.3 KB | response cached | — |
+| 137 | GET | `dashboard/campus/showcase/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 138 | PATCH | `dashboard/campus/showcase/` | — | write (not load-tested) | — | — | — | — | — |
+| 139 | POST | `dashboard/campus/assign-mentor/` | — | write (not load-tested) | — | — | — | — | — |
+| 140 | GET | `dashboard/campus/sessions/list/` | Campus IG Lead | 4 → 4 | — | 0 (paged) | 0.2 KB | per-row method fields: SessionListSerializer: entity_name | — |
+| 141 | GET | `dashboard/campus/<str:org_id>/` | Admin | 14 → 16 | 3× `user_ig_link` | 10 | 2.6 KB | no index: wallet(karma_last_updated_at); per-row method fields: CampusDetailsPublicSerializer: total_karma, rank, social_links, campus_lead | M-66, M-64 |
+| 142 | GET | `dashboard/campus/<str:org_id>/leaderboard/` | Admin | 4 → 4 | — | 10 (paged) | 3.2 KB | — | — |
+| 143 | GET | `dashboard/campus/<str:org_id>/karma-by-cluster/` | Admin | 2 → 2 | — | — | 0.2 KB | — | — |
+| 144 | GET | `dashboard/enabler/home-summary/` | Enabler | 3 → 3 | — | — | 0.1 KB | — | — |
+| 145 | GET | `dashboard/enabler/campuses/` | Enabler | 4 → 4 | — | 1 (paged) | 0.4 KB | — | — |
+| 146 | GET | `dashboard/enabler/campuses/<str:campus_id>/review/` | Enabler | 4 → 4 | — | — | 0.3 KB | — | — |
+| 147 | GET | `dashboard/enabler/campuses/<str:campus_id>/notes/` | Enabler | 1 → 1 | — | 0 (paged) | 0.2 KB | — | — |
+| 148 | POST | `dashboard/enabler/campuses/<str:campus_id>/notes/` | — | write (not load-tested) | — | — | — | — | — |
+| 149 | PATCH | `dashboard/enabler/campuses/<str:campus_id>/notes/` | — | write (not load-tested) | — | — | — | — | — |
+| 150 | DELETE | `dashboard/enabler/campuses/<str:campus_id>/notes/` | — | write (not load-tested) | — | — | — | — | — |
+| 151 | GET | `dashboard/enabler/reports/` | Enabler | 4 → 4 | — | 1 | 0.3 KB | — | — |
+| 152 | GET | `dashboard/roles/user-role/<str:role_id>/` | Admin | 2 → 2 | — | 10 (paged) | 0.8 KB | — | — |
+| 153 | GET | `dashboard/roles/base-template/` | — | not measured (no successful response in test data; 500) | — | — | — | builds a spreadsheet/CSV in the request (api/dashboard/roles/dash_roles_views.py:470) | — |
+| 154 | GET | `dashboard/roles/bulk-assign/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 155 | POST | `dashboard/roles/bulk-assign/` | — | write (not load-tested) | — | — | — | — | — |
+| 156 | PUT | `dashboard/roles/bulk-assign/` | — | write (not load-tested) | — | — | — | — | — |
+| 157 | PATCH | `dashboard/roles/bulk-assign/` | — | write (not load-tested) | — | — | — | — | — |
+| 158 | GET | `dashboard/roles/bulk-assign/<str:role_id>/` | Admin | 2 → 2 | — | 10 (paged) | 0.9 KB | — | — |
+| 159 | POST | `dashboard/roles/bulk-assign/<str:role_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 160 | PUT | `dashboard/roles/bulk-assign/<str:role_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 161 | PATCH | `dashboard/roles/bulk-assign/<str:role_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 162 | POST | `dashboard/roles/bulk-assign-excel/` | — | write (not load-tested) | — | — | — | — | — |
+| 163 | POST | `dashboard/roles/user-role/` | — | write (not load-tested) | — | — | — | — | — |
+| 164 | DELETE | `dashboard/roles/user-role/` | — | write (not load-tested) | — | — | — | insert/update inside a loop (api/dashboard/roles/dash_roles_views.py:411,423); query inside a loop (api/dashboard/roles/dash_roles_views.py:423) | L-59 |
+| 165 | GET | `dashboard/roles/` | Admin | 32 → 32 | 20× `user` | 10 (paged) | 2.8 KB | per-row method fields: RoleDashboardSerializer: members | M-61 |
+| 166 | POST | `dashboard/roles/` | — | write (not load-tested) | — | — | — | — | — |
+| 167 | PATCH | `dashboard/roles/` | — | write (not load-tested) | — | — | — | — | — |
+| 168 | DELETE | `dashboard/roles/` | — | write (not load-tested) | — | — | — | — | — |
+| 169 | GET | `dashboard/roles/` | Admin | 32 → 32 | 20× `user` | 10 (paged) | 2.8 KB | per-row method fields: RoleDashboardSerializer: members | M-61 |
+| 170 | POST | `dashboard/roles/` | — | write (not load-tested) | — | — | — | — | — |
+| 171 | PATCH | `dashboard/roles/` | — | write (not load-tested) | — | — | — | — | — |
+| 172 | DELETE | `dashboard/roles/` | — | write (not load-tested) | — | — | — | — | — |
+| 173 | GET | `dashboard/roles/csv/` | Admin | 106 → 331 | 220× `user` | — | 22.5 KB | per-row method fields: RoleDashboardSerializer: members | M-62 |
+| 174 | GET | `dashboard/roles/<str:roles_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: RoleDashboardSerializer: members | — |
+| 175 | POST | `dashboard/roles/<str:roles_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 176 | PATCH | `dashboard/roles/<str:roles_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 177 | DELETE | `dashboard/roles/<str:roles_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 178 | GET | `dashboard/roles/<str:roles_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: RoleDashboardSerializer: members | — |
+| 179 | POST | `dashboard/roles/<str:roles_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 180 | PATCH | `dashboard/roles/<str:roles_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 181 | DELETE | `dashboard/roles/<str:roles_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 182 | GET | `dashboard/ig/` | Admin | 37 → 69 | 18× `user` | 10 (paged) | 21.2 KB | — | M-60 |
+| 183 | POST | `dashboard/ig/` | — | write (not load-tested) | — | — | — | insert/update inside a loop (api/dashboard/ig/dash_ig_view.py:343) | L-59 |
+| 184 | PUT | `dashboard/ig/` | — | write (not load-tested) | — | — | — | query inside a loop (api/dashboard/ig/dash_ig_view.py:460,460,463); insert/update inside a loop (api/dashboard/ig/dash_ig_view.py:467,471) | L-59 |
+| 185 | DELETE | `dashboard/ig/` | — | write (not load-tested) | — | — | — | — | — |
+| 186 | GET | `dashboard/ig/request/` | Admin | 49 → 83 | 18× `user` | 10 (paged) | 23.8 KB | — | M-60 |
+| 187 | POST | `dashboard/ig/request/` | — | write (not load-tested) | — | — | — | — | — |
+| 188 | PATCH | `dashboard/ig/request/` | — | write (not load-tested) | — | — | — | — | — |
+| 189 | DELETE | `dashboard/ig/request/` | — | write (not load-tested) | — | — | — | — | — |
+| 190 | GET | `dashboard/ig/request/<str:pk>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 191 | POST | `dashboard/ig/request/<str:pk>/` | — | write (not load-tested) | — | — | — | — | — |
+| 192 | PATCH | `dashboard/ig/request/<str:pk>/` | — | write (not load-tested) | — | — | — | — | — |
+| 193 | DELETE | `dashboard/ig/request/<str:pk>/` | — | write (not load-tested) | — | — | — | — | — |
+| 194 | GET | `dashboard/ig/list/` | Admin | 11 → 129 | 51× `user` | 7 | 36.5 KB | response cached | M-60 |
+| 195 | GET | `dashboard/ig/csv/` | Admin | 185 → 847 | 180× `user` | — | 113.2 KB | — | M-60, M-62 |
+| 196 | GET | `dashboard/ig/impact-projects/public/` | Admin | 14 → 15 | 10× `interest_group` | 10 (paged) | 11.6 KB | — | — |
+| 197 | GET | `dashboard/ig/<str:ig_id>/impact-projects/` | Admin | 2 → 8 | 3× `interest_group` | 3 (paged) | 2.5 KB | — | — |
+| 198 | POST | `dashboard/ig/<str:ig_id>/impact-projects/` | — | write (not load-tested) | — | — | — | insert/update inside a loop (api/dashboard/ig/impact_project_view.py:135) | L-59 |
+| 199 | PATCH | `dashboard/ig/<str:ig_id>/impact-projects/<str:project_id>/` | — | write (not load-tested) | — | — | — | insert/update inside a loop (api/dashboard/ig/impact_project_view.py:215) | L-59 |
+| 200 | DELETE | `dashboard/ig/<str:ig_id>/impact-projects/<str:project_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 201 | POST | `dashboard/ig/<str:ig_id>/impact-projects/<str:project_id>/image/` | — | write (not load-tested) | — | — | — | — | — |
+| 202 | POST | `dashboard/ig/<str:pk>/cover-image/` | — | write (not load-tested) | — | — | — | — | — |
+| 203 | DELETE | `dashboard/ig/<str:pk>/cover-image/` | — | write (not load-tested) | — | — | — | — | — |
+| 204 | POST | `dashboard/ig/<str:pk>/icon-image/` | — | write (not load-tested) | — | — | — | — | — |
+| 205 | DELETE | `dashboard/ig/<str:pk>/icon-image/` | — | write (not load-tested) | — | — | — | — | — |
+| 206 | GET | `dashboard/ig/<str:pk>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 207 | POST | `dashboard/ig/<str:pk>/` | — | write (not load-tested) | — | — | — | insert/update inside a loop (api/dashboard/ig/dash_ig_view.py:343) | L-59 |
+| 208 | PUT | `dashboard/ig/<str:pk>/` | — | write (not load-tested) | — | — | — | query inside a loop (api/dashboard/ig/dash_ig_view.py:460,460,463); insert/update inside a loop (api/dashboard/ig/dash_ig_view.py:467,471) | L-59 |
+| 209 | DELETE | `dashboard/ig/<str:pk>/` | — | write (not load-tested) | — | — | — | — | — |
+| 210 | POST | `dashboard/ig/<str:pk>/activate/` | — | write (not load-tested) | — | — | — | — | — |
+| 211 | POST | `dashboard/ig/<str:pk>/deactivate/` | — | write (not load-tested) | — | — | — | — | — |
+| 212 | GET | `dashboard/ig/get/<str:pk>/` | Admin | 13 → 25 | 9× `user` | 5 | 5.8 KB | — | M-60 |
+| 213 | PATCH | `dashboard/ig/get/<str:pk>/` | — | write (not load-tested) | — | — | — | query inside a loop (api/dashboard/ig/dash_ig_view.py:718,718,729); insert/update inside a loop (api/dashboard/ig/dash_ig_view.py:722,767,779) | L-59 |
+| 214 | POST | `dashboard/ig/<str:pk>/join/` | — | write (not load-tested) | — | — | — | — | — |
+| 215 | DELETE | `dashboard/ig/<str:pk>/join/` | — | write (not load-tested) | — | — | — | — | — |
+| 216 | POST | `dashboard/ig/<str:pk>/leave/` | — | write (not load-tested) | — | — | — | — | — |
+| 217 | DELETE | `dashboard/ig/<str:pk>/leave/` | — | write (not load-tested) | — | — | — | — | — |
+| 218 | GET | `dashboard/task/list-task-type/` | Admin | 2 → 2 | — | 10 (paged) | 5.0 KB | — | L-58 |
+| 219 | POST | `dashboard/task/list-task-type/` | — | write (not load-tested) | — | — | — | — | — |
+| 220 | PUT | `dashboard/task/list-task-type/` | — | write (not load-tested) | — | — | — | — | — |
+| 221 | DELETE | `dashboard/task/list-task-type/` | — | write (not load-tested) | — | — | — | — | — |
+| 222 | GET | `dashboard/task/task-type/<str:task_type_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 223 | POST | `dashboard/task/task-type/<str:task_type_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 224 | PUT | `dashboard/task/task-type/<str:task_type_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 225 | DELETE | `dashboard/task/task-type/<str:task_type_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 226 | GET | `dashboard/task/channel/` | Admin | 1 → 1 | — | 28 | 3.7 KB | — | — |
+| 227 | GET | `dashboard/task/ig/` | Admin | 1 → 1 | — | 161 | 20.2 KB | returns every row (no paging) | M-65 |
+| 228 | GET | `dashboard/task/organization/` | Admin | 1 → 1 | — | 145 | 21.2 KB | returns every row (no paging) | M-65 |
+| 229 | GET | `dashboard/task/level/` | Admin | 1 → 1 | — | 47 | 4.9 KB | — | — |
+| 230 | GET | `dashboard/task/task-types/` | Admin | 1 → 1 | — | 79 | 10.2 KB | — | — |
+| 231 | GET | `dashboard/task/` | Admin | 4 → 4 | — | 10 (paged) | 11.6 KB | — | — |
+| 232 | POST | `dashboard/task/` | — | write (not load-tested) | — | — | — | — | — |
+| 233 | GET | `dashboard/task/active/` | Admin | 4 → 4 | — | 10 (paged) | 9.4 KB | — | — |
+| 234 | GET | `dashboard/task/inactive/` | Admin | 3 → 4 | — | 18 (paged) | 3.5 KB | — | — |
+| 235 | GET | `dashboard/task/list/` | Mentor | 9 → 9 | — | 25 | 16.4 KB | no index: events(deleted_at,scope,scope_org_id,status); no index: task_list(event_id); no index: task_list(event_id,requested_by) | M-64 |
+| 236 | GET | `dashboard/task/csv/` | Admin | 4 → 4 | — | — | 18.1 KB | — | — |
+| 237 | POST | `dashboard/task/import/` | — | write (not load-tested) | — | — | — | — | — |
+| 238 | GET | `dashboard/task/base-template/` | — | not measured (no successful response in test data; 500) | — | — | — | builds a spreadsheet/CSV in the request (api/dashboard/task/dash_task_view.py:1158) | — |
+| 239 | GET | `dashboard/task/events/` | Admin | 0 → 0 | — | 2 | 0.1 KB | — | — |
+| 240 | GET | `dashboard/task/pending/` | Admin | 2 → 2 | — | 1 (paged) | 0.5 KB | no index: task_list(approval_status) | M-64 |
+| 241 | PATCH | `dashboard/task/pending/` | — | write (not load-tested) | — | — | — | — | — |
+| 242 | GET | `dashboard/task/<str:task_id>/review/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 243 | PATCH | `dashboard/task/<str:task_id>/review/` | — | write (not load-tested) | — | — | — | — | — |
+| 244 | GET | `dashboard/task/<str:task_id>/` | Admin | 1 → 1 | — | — | 0.4 KB | — | — |
+| 245 | PUT | `dashboard/task/<str:task_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 246 | DELETE | `dashboard/task/<str:task_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 247 | GET | `dashboard/profile/` | Campus IG Lead | 4 → 4 | — | 0 | 0.6 KB | — | — |
+| 248 | PATCH | `dashboard/profile/` | — | write (not load-tested) | — | — | — | — | — |
+| 249 | DELETE | `dashboard/profile/` | — | write (not load-tested) | — | — | — | — | — |
+| 250 | GET | `dashboard/profile/badges/<str:muid>` | Admin | 4 → 4 | 3× `karma_activity_log` | 0 | 0.1 KB | no index: task_list(hashtag); query inside a loop (api/dashboard/profile/profile_view.py:667,667) | M-64 |
+| 251 | GET | `dashboard/profile/user-profile/` | Student | 18 → 18 | — | 8 | 2.5 KB | no index: wallet(karma); per-row method fields: UserProfileSerializer: percentile, rank, interest_groups | H-36, H-40, M-64 |
+| 252 | GET | `dashboard/profile/ig-edit/` | Student | 1 → 1 | — | 1 | 0.1 KB | — | — |
+| 253 | PATCH | `dashboard/profile/ig-edit/` | — | write (not load-tested) | — | — | — | — | — |
+| 254 | GET | `dashboard/profile/user-profile/<str:muid>/` | Admin | 19 → 19 | — | 8 | 2.5 KB | no index: wallet(karma); per-row method fields: UserProfileSerializer: percentile, rank, interest_groups | M-64 |
+| 255 | GET | `dashboard/profile/user-log/` | Student | 1 → 1 | — | 30 | 4.5 KB | returns every row (no paging) | M-65 |
+| 256 | GET | `dashboard/profile/user-log/<str:muid>/` | Admin | 3 → 3 | — | 30 | 4.5 KB | returns every row (no paging) | M-65 |
+| 257 | GET | `dashboard/profile/share-user-profile/` | — | not measured (no successful response in test data; 500) | — | — | — | outbound HTTP in the request (api/dashboard/profile/profile_view.py:437) | — |
+| 258 | PUT | `dashboard/profile/share-user-profile/` | — | write (not load-tested) | — | — | — | — | — |
+| 259 | GET | `dashboard/profile/share-user-profile/<str:uuid>/` | — | not measured (no successful response in test data; 400) | — | — | — | outbound HTTP in the request (api/dashboard/profile/profile_view.py:437) | — |
+| 260 | PUT | `dashboard/profile/share-user-profile/<str:uuid>/` | — | write (not load-tested) | — | — | — | — | — |
+| 261 | GET | `dashboard/profile/rank/<str:muid>/` | Admin | 7 → 7 | — | 1 | 0.2 KB | no index: wallet(karma); per-row method fields: UserRankSerializer: rank, interest_groups | M-64 |
+| 262 | GET | `dashboard/profile/get-user-levels/` | Mentor | 41 → 95 | 47× `karma_activity_log` | 47 | 10.6 KB | per-row method fields: UserLevelSerializer: tasks | L-56 |
+| 263 | GET | `dashboard/profile/get-user-levels/<str:muid>/` | Admin | 43 → 51 | 26× `task_list` | 47 | 10.6 KB | per-row method fields: UserLevelSerializer: tasks | L-56 |
+| 264 | PUT | `dashboard/profile/socials/edit/` | — | write (not load-tested) | — | — | — | — | — |
+| 265 | GET | `dashboard/profile/socials/` | Admin | 1 → 1 | — | — | 0.2 KB | — | — |
+| 266 | GET | `dashboard/profile/socials/<str:muid>/` | Admin | 3 → 3 | — | — | 0.2 KB | — | — |
+| 267 | GET | `dashboard/profile/qrcode-get/<str:uuid>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 268 | POST | `dashboard/profile/change-password/` | — | write (not load-tested) | — | — | — | — | — |
+| 269 | GET | `dashboard/profile/userterm-approved/<str:muid>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 270 | POST | `dashboard/profile/userterm-approved/<str:muid>/` | — | write (not load-tested) | — | — | — | — | — |
+| 271 | GET | `dashboard/profile/karma-feed/` | Admin | 2 → 2 | — | — | 0.2 KB | response cached; index unusable: karma_activity_log(django_datetime_cast_date(created_at)) | M-64 |
+| 272 | GET | `dashboard/profile/user-level-feed/` | Admin | 2 → 2 | — | — | 0.2 KB | — | H-40 |
+| 273 | GET | `dashboard/profile/cover-pic/` | Admin | 1 → 1 | — | — | 0.1 KB | — | — |
+| 274 | POST | `dashboard/profile/cover-pic/` | — | write (not load-tested) | — | — | — | — | — |
+| 275 | DELETE | `dashboard/profile/cover-pic/` | — | write (not load-tested) | — | — | — | — | — |
+| 276 | GET | `dashboard/profile/user-preferences/` | Lead Enabler | 3 → 3 | — | 2 | 0.3 KB | — | — |
+| 277 | PATCH | `dashboard/profile/user-preferences/` | — | write (not load-tested) | — | — | — | — | — |
+| 278 | GET | `dashboard/profile/permute/<str:muid>/` | Admin | 7 → 7 | — | 2 | 0.2 KB | — | — |
+| 279 | GET | `dashboard/learningcircle/create/` | Admin | 4 → 4 | — | 10 (paged) | 3.4 KB | per-row method fields: LearningCircleListMinSerializer: is_joined | — |
+| 280 | POST | `dashboard/learningcircle/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 281 | PUT | `dashboard/learningcircle/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 282 | DELETE | `dashboard/learningcircle/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 283 | GET | `dashboard/learningcircle/list/` | Admin | 4 → 4 | — | 10 (paged) | 3.4 KB | per-row method fields: LearningCircleListMinSerializer: is_joined | — |
+| 284 | POST | `dashboard/learningcircle/list/` | — | write (not load-tested) | — | — | — | — | — |
+| 285 | PUT | `dashboard/learningcircle/list/` | — | write (not load-tested) | — | — | — | — | — |
+| 286 | DELETE | `dashboard/learningcircle/list/` | — | write (not load-tested) | — | — | — | — | — |
+| 287 | GET | `dashboard/learningcircle/info/<str:circle_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: LearningCircleListMinSerializer: is_joined | — |
+| 288 | POST | `dashboard/learningcircle/info/<str:circle_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 289 | PUT | `dashboard/learningcircle/info/<str:circle_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 290 | DELETE | `dashboard/learningcircle/info/<str:circle_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 291 | GET | `dashboard/learningcircle/members/<str:circle_id>/` | Admin | 3 → 3 | — | 13 | 1.7 KB | — | — |
+| 292 | GET | `dashboard/learningcircle/edit/<str:circle_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: LearningCircleListMinSerializer: is_joined | — |
+| 293 | POST | `dashboard/learningcircle/edit/<str:circle_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 294 | PUT | `dashboard/learningcircle/edit/<str:circle_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 295 | DELETE | `dashboard/learningcircle/edit/<str:circle_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 296 | GET | `dashboard/learningcircle/delete/<str:circle_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: LearningCircleListMinSerializer: is_joined | — |
+| 297 | POST | `dashboard/learningcircle/delete/<str:circle_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 298 | PUT | `dashboard/learningcircle/delete/<str:circle_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 299 | DELETE | `dashboard/learningcircle/delete/<str:circle_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 300 | POST | `dashboard/learningcircle/meeting/create/<str:circle_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 301 | PUT | `dashboard/learningcircle/meeting/create/<str:circle_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 302 | DELETE | `dashboard/learningcircle/meeting/create/<str:circle_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 303 | GET | `dashboard/learningcircle/meeting/list-public/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 304 | GET | `dashboard/learningcircle/meeting/list/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 305 | GET | `dashboard/learningcircle/meeting/list/<str:circle_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 306 | POST | `dashboard/learningcircle/meeting/edit/<str:meet_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 307 | PUT | `dashboard/learningcircle/meeting/edit/<str:meet_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 308 | DELETE | `dashboard/learningcircle/meeting/edit/<str:meet_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 309 | GET | `dashboard/learningcircle/meeting/info/<str:meet_id>/` | Admin | 4 → 4 | — | 0 | 0.5 KB | per-row method fields: CircleMeetupInfoSerializer: is_member, attendees | — |
+| 310 | POST | `dashboard/learningcircle/meeting/delete/<str:meet_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 311 | PUT | `dashboard/learningcircle/meeting/delete/<str:meet_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 312 | DELETE | `dashboard/learningcircle/meeting/delete/<str:meet_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 313 | POST | `dashboard/learningcircle/meeting/join/<str:meet_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 314 | DELETE | `dashboard/learningcircle/meeting/join/<str:meet_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 315 | POST | `dashboard/learningcircle/meeting/rsvp/<str:meet_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 316 | DELETE | `dashboard/learningcircle/meeting/rsvp/<str:meet_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 317 | POST | `dashboard/learningcircle/meeting/leave/<str:meet_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 318 | DELETE | `dashboard/learningcircle/meeting/leave/<str:meet_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 319 | GET | `dashboard/learningcircle/meeting/attendee-report/<str:meet_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 320 | POST | `dashboard/learningcircle/meeting/attendee-report/<str:meet_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 321 | DELETE | `dashboard/learningcircle/meeting/attendee-report/<str:meet_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 322 | GET | `dashboard/learningcircle/meeting/report/<str:meet_id>/` | Student | 3 → 3 | — | 0 | 0.2 KB | — | — |
+| 323 | POST | `dashboard/learningcircle/meeting/report/<str:meet_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 324 | DELETE | `dashboard/learningcircle/meeting/report/<str:meet_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 325 | GET | `dashboard/learningcircle/meeting/report/export/<str:meet_id>/` | Student | 4 → 4 | — | — | 0.2 KB | builds a spreadsheet/CSV in the request (api/dashboard/learningcircle/learningcircle_views.py:889) | — |
+| 326 | GET | `dashboard/learningcircle/user-circles/` | Student | 3 → 3 | — | 1 (paged) | 0.3 KB | per-row method fields: UserCircleListSerializer: total_members | — |
+| 327 | GET | `dashboard/learningcircle/join/<str:circle_id>/` | Student | 2 → 2 | — | 25 | 4.5 KB | — | — |
+| 328 | POST | `dashboard/learningcircle/join/<str:circle_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 329 | PATCH | `dashboard/learningcircle/join/<str:circle_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 330 | POST | `dashboard/learningcircle/members/add/<str:circle_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 331 | DELETE | `dashboard/learningcircle/members/remove/<str:circle_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 332 | DELETE | `dashboard/learningcircle/leave/<str:circle_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 333 | GET | `dashboard/learningcircle/invite/status/` | Fellow | 1 → 1 | — | 1 | 0.4 KB | — | — |
+| 334 | POST | `dashboard/learningcircle/invite/status/` | — | write (not load-tested) | — | — | — | — | — |
+| 335 | GET | `dashboard/learningcircle/invite/status/<str:link_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 336 | POST | `dashboard/learningcircle/invite/status/<str:link_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 337 | GET | `dashboard/learningcircle/invite/sent/<str:circle_id>/` | Student | 2 → 2 | — | 1 | 0.3 KB | — | — |
+| 338 | POST | `dashboard/learningcircle/invite/<str:circle_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 339 | POST | `dashboard/learningcircle/transfer-lead/<str:circle_id>/` | — | write (not load-tested) | — | — | — | insert/update inside a loop (api/dashboard/learningcircle/learningcircle_views.py:1722) | L-59 |
+| 340 | GET | `dashboard/referral/` | Student | 1 → 13 | 3× `user` | 3 | 0.4 KB | per-row method fields: ReferralListSerializer: karma, level | M-61 |
+| 341 | POST | `dashboard/referral/send-referral/` | — | write (not load-tested) | — | — | — | sends e-mail in the request (api/dashboard/referral/referral_view.py:40,56) | M-70 |
+| 342 | GET | `dashboard/college/` | Admin | 23 → 72 | 10× `user_organization_link` | 10 (paged) | 4.0 KB | per-row method fields: CollegeListSerializer: no_of_lc, total_karma | M-61, M-66 |
+| 343 | PATCH | `dashboard/college/change-college/` | — | write (not load-tested) | — | — | — | — | — |
+| 344 | GET | `dashboard/college/<str:college_code>/` | Admin | 1 → 1 | — | 0 (paged) | 0.2 KB | per-row method fields: CollegeListSerializer: no_of_lc, total_karma | — |
+| 345 | GET | `dashboard/karma-voucher/` | Admin | 2 → 2 | — | 10 (paged) | 6.4 KB | — | — |
+| 346 | POST | `dashboard/karma-voucher/` | — | write (not load-tested) | — | — | — | sends e-mail in the request (api/dashboard/karma_voucher/karma_voucher_view.py:325,340) | H-38, M-70 |
+| 347 | PATCH | `dashboard/karma-voucher/` | — | write (not load-tested) | — | — | — | — | — |
+| 348 | DELETE | `dashboard/karma-voucher/` | — | write (not load-tested) | — | — | — | — | — |
+| 349 | POST | `dashboard/karma-voucher/import/` | — | write (not load-tested) | — | — | — | query inside a loop (api/dashboard/karma_voucher/karma_voucher_view.py:114); sends e-mail in the request (api/dashboard/karma_voucher/karma_voucher_view.py:214,229) | H-38, L-59, M-70 |
+| 350 | GET | `dashboard/karma-voucher/export/` | Admin | 13 → 113 | 84× `user` | — | 8.9 KB | — | M-62 |
+| 351 | GET | `dashboard/karma-voucher/create/` | Admin | 2 → 2 | — | 10 (paged) | 6.4 KB | — | — |
+| 352 | POST | `dashboard/karma-voucher/create/` | — | write (not load-tested) | — | — | — | sends e-mail in the request (api/dashboard/karma_voucher/karma_voucher_view.py:325,340) | H-38, M-70 |
+| 353 | PATCH | `dashboard/karma-voucher/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 354 | DELETE | `dashboard/karma-voucher/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 355 | GET | `dashboard/karma-voucher/update/<str:voucher_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 356 | POST | `dashboard/karma-voucher/update/<str:voucher_id>/` | — | write (not load-tested) | — | — | — | sends e-mail in the request (api/dashboard/karma_voucher/karma_voucher_view.py:325,340) | M-70 |
+| 357 | PATCH | `dashboard/karma-voucher/update/<str:voucher_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 358 | DELETE | `dashboard/karma-voucher/update/<str:voucher_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 359 | GET | `dashboard/karma-voucher/delete/<str:voucher_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 360 | POST | `dashboard/karma-voucher/delete/<str:voucher_id>/` | — | write (not load-tested) | — | — | — | sends e-mail in the request (api/dashboard/karma_voucher/karma_voucher_view.py:325,340) | M-70 |
+| 361 | PATCH | `dashboard/karma-voucher/delete/<str:voucher_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 362 | DELETE | `dashboard/karma-voucher/delete/<str:voucher_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 363 | GET | `dashboard/karma-voucher/base-template/` | — | not measured (no successful response in test data; 500) | — | — | — | builds a spreadsheet/CSV in the request (api/dashboard/karma_voucher/karma_voucher_view.py:416) | — |
+| 364 | GET | `dashboard/location/countries/` | Admin | 2 → 2 | — | 10 (paged) | 5.3 KB | — | — |
+| 365 | POST | `dashboard/location/countries/` | — | write (not load-tested) | — | — | — | — | — |
+| 366 | PATCH | `dashboard/location/countries/` | — | write (not load-tested) | — | — | — | — | — |
+| 367 | DELETE | `dashboard/location/countries/` | — | write (not load-tested) | — | — | — | — | — |
+| 368 | GET | `dashboard/location/countries/list/` | Admin | 1 → 1 | — | 245 | 31.4 KB | response cached | — |
+| 369 | GET | `dashboard/location/countries/<str:country_id>/` | Admin | 1 → 1 | — | 1 (paged) | 0.7 KB | — | — |
+| 370 | POST | `dashboard/location/countries/<str:country_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 371 | PATCH | `dashboard/location/countries/<str:country_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 372 | DELETE | `dashboard/location/countries/<str:country_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 373 | GET | `dashboard/location/states/` | Admin | 2 → 2 | — | 10 (paged) | 6.2 KB | — | — |
+| 374 | POST | `dashboard/location/states/` | — | write (not load-tested) | — | — | — | — | — |
+| 375 | PATCH | `dashboard/location/states/` | — | write (not load-tested) | — | — | — | — | — |
+| 376 | DELETE | `dashboard/location/states/` | — | write (not load-tested) | — | — | — | — | — |
+| 377 | GET | `dashboard/location/states/list/` | Admin | 1 → 1 | — | 217 | 27.8 KB | response cached | — |
+| 378 | GET | `dashboard/location/states/<str:state_id>/` | Admin | 1 → 1 | — | 1 (paged) | 0.8 KB | — | — |
+| 379 | POST | `dashboard/location/states/<str:state_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 380 | PATCH | `dashboard/location/states/<str:state_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 381 | DELETE | `dashboard/location/states/<str:state_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 382 | GET | `dashboard/location/zones/` | Admin | 2 → 2 | — | 10 (paged) | 6.4 KB | — | — |
+| 383 | POST | `dashboard/location/zones/` | — | write (not load-tested) | — | — | — | — | — |
+| 384 | PATCH | `dashboard/location/zones/` | — | write (not load-tested) | — | — | — | — | — |
+| 385 | DELETE | `dashboard/location/zones/` | — | write (not load-tested) | — | — | — | — | — |
+| 386 | GET | `dashboard/location/zones/list/` | Admin | 1 → 1 | — | 189 | 24.2 KB | response cached | — |
+| 387 | GET | `dashboard/location/zones/<str:zone_id>/` | Admin | 1 → 1 | — | 1 (paged) | 0.6 KB | — | — |
+| 388 | POST | `dashboard/location/zones/<str:zone_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 389 | PATCH | `dashboard/location/zones/<str:zone_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 390 | DELETE | `dashboard/location/zones/<str:zone_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 391 | GET | `dashboard/location/districts/` | Admin | 2 → 2 | — | 10 (paged) | 6.7 KB | — | — |
+| 392 | POST | `dashboard/location/districts/` | — | write (not load-tested) | — | — | — | — | — |
+| 393 | PATCH | `dashboard/location/districts/` | — | write (not load-tested) | — | — | — | — | — |
+| 394 | DELETE | `dashboard/location/districts/` | — | write (not load-tested) | — | — | — | — | — |
+| 395 | GET | `dashboard/location/districts/<str:district_id>/` | Admin | 1 → 1 | — | 1 (paged) | 0.7 KB | — | — |
+| 396 | POST | `dashboard/location/districts/<str:district_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 397 | PATCH | `dashboard/location/districts/<str:district_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 398 | DELETE | `dashboard/location/districts/<str:district_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 399 | POST | `dashboard/organisation/institutes/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 400 | PUT | `dashboard/organisation/institutes/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 401 | DELETE | `dashboard/organisation/institutes/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 402 | POST | `dashboard/organisation/institutes/edit/<str:org_code>/` | — | write (not load-tested) | — | — | — | — | — |
+| 403 | PUT | `dashboard/organisation/institutes/edit/<str:org_code>/` | — | write (not load-tested) | — | — | — | — | — |
+| 404 | DELETE | `dashboard/organisation/institutes/edit/<str:org_code>/` | — | write (not load-tested) | — | — | — | — | — |
+| 405 | POST | `dashboard/organisation/institutes/delete/<str:org_code>/` | — | write (not load-tested) | — | — | — | — | — |
+| 406 | PUT | `dashboard/organisation/institutes/delete/<str:org_code>/` | — | write (not load-tested) | — | — | — | — | — |
+| 407 | DELETE | `dashboard/organisation/institutes/delete/<str:org_code>/` | — | write (not load-tested) | — | — | — | — | — |
+| 408 | GET | `dashboard/organisation/institutes/<str:org_type>/csv/` | Admin | 1 → 1 | — | — | 0.7 KB | — | — |
+| 409 | GET | `dashboard/organisation/institutes/info/<str:org_code>/` | Admin | 1 → 1 | — | 1 | 0.8 KB | — | — |
+| 410 | GET | `dashboard/organisation/institutes/prefill/<str:org_code>/` | Admin | 1 → 1 | — | — | 0.8 KB | — | — |
+| 411 | GET | `dashboard/organisation/institutes/<str:org_type>/` | Admin | 2 → 2 | — | 10 (paged) | 4.7 KB | — | L-58 |
+| 412 | GET | `dashboard/organisation/institutes/<str:org_type>/<str:district_id>/` | Admin | 2 → 1 | — | 0 (paged) | 0.2 KB | — | — |
+| 413 | GET | `dashboard/organisation/institutes/org/affiliation/show/` | Admin | 2 → 2 | — | 10 (paged) | 1.5 KB | — | — |
+| 414 | POST | `dashboard/organisation/institutes/org/affiliation/show/` | — | write (not load-tested) | — | — | — | — | — |
+| 415 | PUT | `dashboard/organisation/institutes/org/affiliation/show/` | — | write (not load-tested) | — | — | — | — | — |
+| 416 | DELETE | `dashboard/organisation/institutes/org/affiliation/show/` | — | write (not load-tested) | — | — | — | — | — |
+| 417 | GET | `dashboard/organisation/institutes/org/affiliation/create/` | Admin | 2 → 2 | — | 10 (paged) | 1.5 KB | — | — |
+| 418 | POST | `dashboard/organisation/institutes/org/affiliation/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 419 | PUT | `dashboard/organisation/institutes/org/affiliation/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 420 | DELETE | `dashboard/organisation/institutes/org/affiliation/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 421 | GET | `dashboard/organisation/institutes/org/affiliation/edit/<str:affiliation_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 422 | POST | `dashboard/organisation/institutes/org/affiliation/edit/<str:affiliation_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 423 | PUT | `dashboard/organisation/institutes/org/affiliation/edit/<str:affiliation_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 424 | DELETE | `dashboard/organisation/institutes/org/affiliation/edit/<str:affiliation_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 425 | GET | `dashboard/organisation/institutes/org/affiliation/delete/<str:affiliation_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 426 | POST | `dashboard/organisation/institutes/org/affiliation/delete/<str:affiliation_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 427 | PUT | `dashboard/organisation/institutes/org/affiliation/delete/<str:affiliation_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 428 | DELETE | `dashboard/organisation/institutes/org/affiliation/delete/<str:affiliation_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 429 | GET | `dashboard/organisation/departments/` | Admin | 2 → 2 | — | 10 (paged) | 1.7 KB | — | L-58 |
+| 430 | POST | `dashboard/organisation/departments/` | — | write (not load-tested) | — | — | — | — | — |
+| 431 | PUT | `dashboard/organisation/departments/` | — | write (not load-tested) | — | — | — | — | — |
+| 432 | DELETE | `dashboard/organisation/departments/` | — | write (not load-tested) | — | — | — | — | — |
+| 433 | GET | `dashboard/organisation/departments/create/` | Admin | 2 → 2 | — | 10 (paged) | 1.7 KB | — | — |
+| 434 | POST | `dashboard/organisation/departments/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 435 | PUT | `dashboard/organisation/departments/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 436 | DELETE | `dashboard/organisation/departments/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 437 | GET | `dashboard/organisation/departments/edit/<str:department_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 438 | POST | `dashboard/organisation/departments/edit/<str:department_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 439 | PUT | `dashboard/organisation/departments/edit/<str:department_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 440 | DELETE | `dashboard/organisation/departments/edit/<str:department_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 441 | GET | `dashboard/organisation/departments/delete/<str:department_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 442 | POST | `dashboard/organisation/departments/delete/<str:department_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 443 | PUT | `dashboard/organisation/departments/delete/<str:department_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 444 | DELETE | `dashboard/organisation/departments/delete/<str:department_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 445 | GET | `dashboard/organisation/affiliation/list/` | Admin | 1 → 1 | — | 28 | 3.7 KB | — | — |
+| 446 | GET | `dashboard/organisation/merge_organizations/<str:organisation_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: OrganizationMergerSerializer: update_summary | — |
+| 447 | PATCH | `dashboard/organisation/merge_organizations/<str:organisation_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 448 | POST | `dashboard/organisation/karma-type/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 449 | POST | `dashboard/organisation/karma-log/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 450 | GET | `dashboard/organisation/base-template/` | — | not measured (no successful response in test data; 500) | — | — | — | builds a spreadsheet/CSV in the request (api/dashboard/organisation/organisation_views.py:650) | — |
+| 451 | POST | `dashboard/organisation/import/` | — | write (not load-tested) | — | — | — | — | — |
+| 452 | POST | `dashboard/organisation/transfer/` | — | write (not load-tested) | — | — | — | — | — |
+| 453 | GET | `dashboard/organisation/verify/list/` | Admin | 2 → 2 | — | 10 (paged) | 3.0 KB | — | — |
+| 454 | POST | `dashboard/organisation/verify/<str:uorg_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 455 | GET | `dashboard/dynamic-management/dynamic-role/` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: DynamicRoleListSerializer: roles | — |
+| 456 | POST | `dashboard/dynamic-management/dynamic-role/` | — | write (not load-tested) | — | — | — | — | — |
+| 457 | PATCH | `dashboard/dynamic-management/dynamic-role/` | — | write (not load-tested) | — | — | — | — | — |
+| 458 | DELETE | `dashboard/dynamic-management/dynamic-role/` | — | write (not load-tested) | — | — | — | — | — |
+| 459 | GET | `dashboard/dynamic-management/dynamic-role/create/` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: DynamicRoleListSerializer: roles | — |
+| 460 | POST | `dashboard/dynamic-management/dynamic-role/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 461 | PATCH | `dashboard/dynamic-management/dynamic-role/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 462 | DELETE | `dashboard/dynamic-management/dynamic-role/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 463 | GET | `dashboard/dynamic-management/dynamic-role/delete/<str:type_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: DynamicRoleListSerializer: roles | — |
+| 464 | POST | `dashboard/dynamic-management/dynamic-role/delete/<str:type_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 465 | PATCH | `dashboard/dynamic-management/dynamic-role/delete/<str:type_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 466 | DELETE | `dashboard/dynamic-management/dynamic-role/delete/<str:type_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 467 | GET | `dashboard/dynamic-management/dynamic-role/update/<str:type_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: DynamicRoleListSerializer: roles | — |
+| 468 | POST | `dashboard/dynamic-management/dynamic-role/update/<str:type_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 469 | PATCH | `dashboard/dynamic-management/dynamic-role/update/<str:type_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 470 | DELETE | `dashboard/dynamic-management/dynamic-role/update/<str:type_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 471 | GET | `dashboard/dynamic-management/dynamic-user/` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: DynamicUserListSerializer: users | — |
+| 472 | POST | `dashboard/dynamic-management/dynamic-user/` | — | write (not load-tested) | — | — | — | — | — |
+| 473 | PATCH | `dashboard/dynamic-management/dynamic-user/` | — | write (not load-tested) | — | — | — | — | — |
+| 474 | DELETE | `dashboard/dynamic-management/dynamic-user/` | — | write (not load-tested) | — | — | — | — | — |
+| 475 | GET | `dashboard/dynamic-management/dynamic-user/create/` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: DynamicUserListSerializer: users | — |
+| 476 | POST | `dashboard/dynamic-management/dynamic-user/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 477 | PATCH | `dashboard/dynamic-management/dynamic-user/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 478 | DELETE | `dashboard/dynamic-management/dynamic-user/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 479 | GET | `dashboard/dynamic-management/dynamic-user/delete/<str:type_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: DynamicUserListSerializer: users | — |
+| 480 | POST | `dashboard/dynamic-management/dynamic-user/delete/<str:type_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 481 | PATCH | `dashboard/dynamic-management/dynamic-user/delete/<str:type_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 482 | DELETE | `dashboard/dynamic-management/dynamic-user/delete/<str:type_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 483 | GET | `dashboard/dynamic-management/dynamic-user/update/<str:type_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: DynamicUserListSerializer: users | — |
+| 484 | POST | `dashboard/dynamic-management/dynamic-user/update/<str:type_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 485 | PATCH | `dashboard/dynamic-management/dynamic-user/update/<str:type_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 486 | DELETE | `dashboard/dynamic-management/dynamic-user/update/<str:type_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 487 | GET | `dashboard/dynamic-management/types/` | Admin | 0 → 0 | — | 15 | 0.3 KB | — | — |
+| 488 | GET | `dashboard/dynamic-management/roles/` | Admin | 1 → 1 | — | 110 | 12.6 KB | returns every row (no paging) | M-65 |
+| 489 | GET | `dashboard/error-log/` | Admin | 0 → 0 | — | 0 | 0.1 KB | — | — |
+| 490 | PATCH | `dashboard/error-log/` | — | write (not load-tested) | — | — | — | — | — |
+| 491 | GET | `dashboard/error-log/graph/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 492 | GET | `dashboard/error-log/tab/` | Admin | 0 → 0 | — | 0 | 0.1 KB | — | — |
+| 493 | GET | `dashboard/error-log/patch/<str:error_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 494 | PATCH | `dashboard/error-log/patch/<str:error_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 495 | GET | `dashboard/error-log/<str:log_name>/` | Admin | 0 → 0 | — | — | 0.0 KB | — | — |
+| 496 | GET | `dashboard/error-log/view/<str:log_name>/` | Admin | 0 → 0 | — | — | 0.1 KB | — | — |
+| 497 | POST | `dashboard/error-log/clear/<str:log_name>/` | — | write (not load-tested) | — | — | — | — | — |
+| 498 | GET | `dashboard/affiliation/` | Admin | 11 → 32 | 20× `user` | 10 (paged) | 3.6 KB | — | M-61 |
+| 499 | POST | `dashboard/affiliation/` | — | write (not load-tested) | — | — | — | — | — |
+| 500 | PUT | `dashboard/affiliation/` | — | write (not load-tested) | — | — | — | — | — |
+| 501 | DELETE | `dashboard/affiliation/` | — | write (not load-tested) | — | — | — | — | — |
+| 502 | GET | `dashboard/affiliation/<str:affiliation_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 503 | POST | `dashboard/affiliation/<str:affiliation_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 504 | PUT | `dashboard/affiliation/<str:affiliation_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 505 | DELETE | `dashboard/affiliation/<str:affiliation_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 506 | GET | `dashboard/channels/` | Admin | 8 → 22 | 20× `user` | 10 (paged) | 3.3 KB | — | M-61 |
+| 507 | POST | `dashboard/channels/` | — | write (not load-tested) | — | — | — | — | — |
+| 508 | PUT | `dashboard/channels/` | — | write (not load-tested) | — | — | — | — | — |
+| 509 | DELETE | `dashboard/channels/` | — | write (not load-tested) | — | — | — | — | — |
+| 510 | GET | `dashboard/channels/<str:channel_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 511 | POST | `dashboard/channels/<str:channel_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 512 | PUT | `dashboard/channels/<str:channel_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 513 | DELETE | `dashboard/channels/<str:channel_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 514 | GET | `dashboard/discord-moderator/tasklist/` | Admin | ? → 22 | 10× `user` | 10 (paged) | 1.6 KB | — | M-61 |
+| 515 | GET | `dashboard/discord-moderator/pendingcounts/` | Admin | 2 → 2 | — | — | 0.1 KB | — | — |
+| 516 | GET | `dashboard/discord-moderator/leaderboard/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 517 | GET | `dashboard/events/meta/categories/` | Admin | 1 → 1 | — | 28 | 9.1 KB | — | — |
+| 518 | GET | `dashboard/events/meta/organizer-options/` | Mentor | 10 → 10 | 4× `mentor_scope_grant` | 1 | 0.6 KB | — | — |
+| 519 | GET | `dashboard/events/meta/collaboration-targets/` | Admin | 4 → 4 | — | 20 | 7.5 KB | — | — |
+| 520 | GET | `dashboard/events/meta/event-type-scope/` | Admin | 0 → 0 | — | 16 | 0.9 KB | — | — |
+| 521 | GET | `dashboard/events/meta/linkable-events/` | Admin | 3 → 3 | — | 1 | 0.2 KB | no index: events(deleted_at,end_datetime,scope,scope_org_id,status) | M-64 |
+| 522 | GET | `dashboard/events/ig/cluster/<str:cluster>/` | Admin | 2 → 2 | — | 0 (paged) | 0.2 KB | no index: events(deleted_at,end_datetime,organiser_ig_id,status); per-row method fields: EventListItemSerializer: viewer_interest_status | M-64 |
+| 523 | GET | `dashboard/events/ig/<str:ig_id>/` | Admin | 2 → 2 | — | 0 (paged) | 0.2 KB | no index: events(deleted_at,end_datetime,organiser_ig_id,scope_ig_id,status); per-row method fields: EventListItemSerializer: viewer_interest_status | M-64 |
+| 524 | GET | `dashboard/events/campus/<str:campus_id>/` | Admin | 2 → 2 | — | 0 (paged) | 0.2 KB | no index: events(deleted_at,end_datetime,organiser_org_id,scope_org_id,status); per-row method fields: EventListItemSerializer: viewer_interest_status | M-64 |
+| 525 | GET | `dashboard/events/campus-ig/<str:campus_ig_id>/` | Admin | 1 → 1 | — | 0 (paged) | 0.2 KB | no index: events(deleted_at,end_datetime,organiser_ci_id,status); per-row method fields: EventListItemSerializer: viewer_interest_status | M-64 |
+| 526 | GET | `dashboard/events/company/<str:company_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: EventListItemSerializer: viewer_interest_status | — |
+| 527 | GET | `dashboard/events/admin/` | Admin | 12 → 12 | 10× `events_interest` | 10 (paged) | 11.2 KB | per-row method fields: EventListItemSerializer: viewer_interest_status | M-61 |
+| 528 | POST | `dashboard/events/admin/<str:event_id>/approve/` | — | write (not load-tested) | — | — | — | — | — |
+| 529 | POST | `dashboard/events/admin/<str:event_id>/reject/` | — | write (not load-tested) | — | — | — | — | — |
+| 530 | PATCH | `dashboard/events/admin/<str:event_id>/feature/` | — | write (not load-tested) | — | — | — | — | — |
+| 531 | POST | `dashboard/events/mentor/<str:event_id>/approve/` | — | write (not load-tested) | — | — | — | — | — |
+| 532 | POST | `dashboard/events/mentor/<str:event_id>/reject/` | — | write (not load-tested) | — | — | — | — | — |
+| 533 | POST | `dashboard/events/campus/<str:event_id>/approve/` | — | write (not load-tested) | — | — | — | — | — |
+| 534 | POST | `dashboard/events/campus/<str:event_id>/reject/` | — | write (not load-tested) | — | — | — | — | — |
+| 535 | POST | `dashboard/events/company/<str:event_id>/approve/` | — | write (not load-tested) | — | — | — | — | — |
+| 536 | POST | `dashboard/events/company/<str:event_id>/reject/` | — | write (not load-tested) | — | — | — | — | — |
+| 537 | GET | `dashboard/events/manage/` | Mentor | 4 → 6 | — | 1 (paged) | 1.3 KB | per-row method fields: EventListItemSerializer: viewer_interest_status | — |
+| 538 | POST | `dashboard/events/manage/` | — | write (not load-tested) | — | — | — | — | — |
+| 539 | POST | `dashboard/events/manage/<str:event_id>/publish/` | — | write (not load-tested) | — | — | — | — | — |
+| 540 | GET | `dashboard/events/manage/<str:event_id>/co-owners/` | Admin | 2 → 3 | — | 1 | 0.3 KB | per-row method fields: EventCoOwnerSerializer: user | — |
+| 541 | POST | `dashboard/events/manage/<str:event_id>/co-owners/` | — | write (not load-tested) | — | — | — | — | — |
+| 542 | DELETE | `dashboard/events/manage/<str:event_id>/co-owners/<str:co_owner_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 543 | GET | `dashboard/events/manage/<str:event_id>/collaborators/` | Admin | 2 → 2 | — | 3 | 1.1 KB | per-row method fields: EventCollaboratorSerializer: entity_detail | — |
+| 544 | POST | `dashboard/events/manage/<str:event_id>/collaborators/` | — | write (not load-tested) | — | — | — | — | — |
+| 545 | POST | `dashboard/events/manage/<str:event_id>/collaborators/<str:collaborator_id>/accept/` | — | write (not load-tested) | — | — | — | — | — |
+| 546 | POST | `dashboard/events/manage/<str:event_id>/collaborators/<str:collaborator_id>/reject/` | — | write (not load-tested) | — | — | — | — | — |
+| 547 | DELETE | `dashboard/events/manage/<str:event_id>/collaborators/<str:collaborator_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 548 | GET | `dashboard/events/manage/<str:event_id>/tasks/meta/` | Admin | 6 → 6 | — | 161 | 58.9 KB | returns every row (no paging) | M-65 |
+| 549 | GET | `dashboard/events/manage/<str:event_id>/tasks/<str:task_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 550 | PATCH | `dashboard/events/manage/<str:event_id>/tasks/<str:task_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 551 | DELETE | `dashboard/events/manage/<str:event_id>/tasks/<str:task_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 552 | GET | `dashboard/events/manage/<str:event_id>/tasks/` | Admin | 2 → 3 | — | 6 (paged) | 5.6 KB | no index: task_list(event_id) | M-64 |
+| 553 | POST | `dashboard/events/manage/<str:event_id>/tasks/` | — | write (not load-tested) | — | — | — | — | — |
+| 554 | GET | `dashboard/events/manage/<str:event_id>/analytics/` | Admin | 11 → 14 | — | 6 | 2.2 KB | no index: task_list(approval_status,event_id); no index: task_list(event_id) | M-64 |
+| 555 | GET | `dashboard/events/manage/<str:event_id>/` | Admin | 11 → 28 | 12× `user` | 10 | 7.8 KB | no index: task_list(event_id); per-row method fields: EventDetailSerializer: collaborators, co_owners, linked_tasks, viewer_interest_status | M-61, M-64 |
+| 556 | PUT | `dashboard/events/manage/<str:event_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 557 | PATCH | `dashboard/events/manage/<str:event_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 558 | DELETE | `dashboard/events/manage/<str:event_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 559 | GET | `dashboard/events/my-invites/` | Campus IG Lead | 2 → 2 | — | 0 | 0.1 KB | — | — |
+| 560 | GET | `dashboard/events/calendar/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 561 | GET | `dashboard/events/featured/` | Admin | 3 → 3 | — | 0 (paged) | 0.2 KB | no index: events(deleted_at,end_datetime,scope,scope_org_id,status); per-row method fields: EventListItemSerializer: viewer_interest_status | M-64 |
+| 562 | GET | `dashboard/events/is-featured/` | Admin | 3 → 3 | — | 0 (paged) | 0.2 KB | no index: events(deleted_at,end_datetime,scope,scope_org_id,status); per-row method fields: EventListItemSerializer: viewer_interest_status | M-64 |
+| 563 | GET | `dashboard/events/tasks/` | Admin | 3 → 20 | 8× `user` | 8 (paged) | 4.4 KB | no index: events(deleted_at,end_datetime,scope,scope_org_id,status); no index: task_list(event_id) | M-61, M-64 |
+| 564 | POST | `dashboard/events/<str:event_id>/interest/` | — | write (not load-tested) | — | — | — | — | — |
+| 565 | DELETE | `dashboard/events/<str:event_id>/interest/` | — | write (not load-tested) | — | — | — | — | — |
+| 566 | GET | `dashboard/events/<str:event_id>/` | Admin | 10 → 17 | 6× `interest_group` | 6 | 4.3 KB | no index: task_list(event_id); per-row method fields: EventDetailSerializer: collaborators, co_owners, linked_tasks, viewer_interest_status | M-61, M-64 |
+| 567 | GET | `dashboard/events/` | Admin | 4 → 4 | — | 1 (paged) | 0.9 KB | no index: events(deleted_at,end_datetime,scope,scope_org_id,status); per-row method fields: EventListItemSerializer: viewer_interest_status | M-64 |
+| 568 | POST | `dashboard/coupon/verify-coupon/` | — | write (not load-tested) | — | — | — | — | — |
+| 569 | GET | `dashboard/projects/` | Admin | 15 → 8 | — | 10 (paged) | 8.7 KB | — | — |
+| 570 | POST | `dashboard/projects/` | — | write (not load-tested) | — | — | — | insert/update inside a loop (api/dashboard/projects/projects_view.py:224) | L-59 |
+| 571 | GET | `dashboard/projects/<uuid:pk>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 572 | PUT | `dashboard/projects/<uuid:pk>/` | — | write (not load-tested) | — | — | — | insert/update inside a loop (api/dashboard/projects/projects_view.py:69) | L-59 |
+| 573 | DELETE | `dashboard/projects/<uuid:pk>/` | — | write (not load-tested) | — | — | — | — | — |
+| 574 | PATCH | `dashboard/projects/<uuid:pk>/status/` | — | write (not load-tested) | — | — | — | — | — |
+| 575 | GET | `dashboard/projects/<uuid:project_id>/members/` | Admin | 1 → 1 | — | 0 | 0.1 KB | — | — |
+| 576 | POST | `dashboard/projects/<uuid:project_id>/members/` | — | write (not load-tested) | — | — | — | — | — |
+| 577 | DELETE | `dashboard/projects/<uuid:project_id>/members/` | — | write (not load-tested) | — | — | — | — | — |
+| 578 | GET | `dashboard/projects/<uuid:project_id>/members/<uuid:pk>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 579 | POST | `dashboard/projects/<uuid:project_id>/members/<uuid:pk>/` | — | write (not load-tested) | — | — | — | — | — |
+| 580 | DELETE | `dashboard/projects/<uuid:project_id>/members/<uuid:pk>/` | — | write (not load-tested) | — | — | — | — | — |
+| 581 | POST | `dashboard/projects/vote/` | — | write (not load-tested) | — | — | — | — | — |
+| 582 | DELETE | `dashboard/projects/vote/` | — | write (not load-tested) | — | — | — | — | — |
+| 583 | POST | `dashboard/projects/vote/<uuid:pk>/` | — | write (not load-tested) | — | — | — | — | — |
+| 584 | DELETE | `dashboard/projects/vote/<uuid:pk>/` | — | write (not load-tested) | — | — | — | — | — |
+| 585 | POST | `dashboard/projects/comment/` | — | write (not load-tested) | — | — | — | — | — |
+| 586 | PUT | `dashboard/projects/comment/` | — | write (not load-tested) | — | — | — | — | — |
+| 587 | DELETE | `dashboard/projects/comment/` | — | write (not load-tested) | — | — | — | — | — |
+| 588 | POST | `dashboard/projects/comment/<uuid:pk>/` | — | write (not load-tested) | — | — | — | — | — |
+| 589 | PUT | `dashboard/projects/comment/<uuid:pk>/` | — | write (not load-tested) | — | — | — | — | — |
+| 590 | DELETE | `dashboard/projects/comment/<uuid:pk>/` | — | write (not load-tested) | — | — | — | — | — |
+| 591 | GET | `dashboard/achievement/list/` | Admin | 2 → 2 | — | 140 | 107.6 KB | returns every row (no paging) | M-65 |
+| 592 | GET | `dashboard/achievement/eligible/` | Student | 5 → 14 | 7× `karma_activity_log` | 28 | 7.7 KB | no index: task_list(event); returns every row (no paging) | M-65, M-64 |
+| 593 | POST | `dashboard/achievement/claim/<str:achievement_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 594 | GET | `dashboard/achievement/list/user/<str:muid>/` | Admin | 2 → 2 | — | 0 | 0.1 KB | — | — |
+| 595 | GET | `dashboard/achievement/progress/` | Campus IG Lead | 5 → 14 | 7× `karma_activity_log` | 29 | 8.3 KB | no index: task_list(event); returns every row (no paging) | M-65, M-64 |
+| 596 | POST | `dashboard/achievement/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 597 | PUT | `dashboard/achievement/update/<str:achievement_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 598 | DELETE | `dashboard/achievement/delete/<str:achievement_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 599 | GET | `dashboard/achievement/rules/` | Admin | 1 → 1 | — | 28 | 8.7 KB | returns every row (no paging) | M-65 |
+| 600 | POST | `dashboard/achievement/rules/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 601 | GET | `dashboard/achievement/rules/<str:rule_id>/` | Admin | 1 → 1 | — | — | 0.4 KB | — | — |
+| 602 | PATCH | `dashboard/achievement/rules/<str:rule_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 603 | POST | `dashboard/achievement/rules/<str:rule_id>/deactivate/` | — | write (not load-tested) | — | — | — | — | — |
+| 604 | POST | `dashboard/achievement/rules/<str:rule_id>/activate/` | — | write (not load-tested) | — | — | — | — | — |
+| 605 | GET | `dashboard/achievement/simulate/<str:muid>/` | Admin | 6 → 15 | 7× `karma_activity_log` | 28 | 8.1 KB | no index: task_list(event); returns every row (no paging) | M-65, M-64 |
+| 606 | GET | `dashboard/achievement/debug/<str:muid>/<str:achievement_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 607 | POST | `dashboard/achievement/manual-issue/` | — | write (not load-tested) | — | — | — | — | — |
+| 608 | POST | `dashboard/achievement/revoke/` | — | write (not load-tested) | — | — | — | — | — |
+| 609 | GET | `dashboard/achievement/audit/<str:muid>/` | Admin | 2 → 2 | — | 0 | 0.1 KB | — | — |
+| 610 | POST | `dashboard/achievement/issue-vc/` | — | write (not load-tested) | — | — | — | — | — |
+| 611 | POST | `dashboard/achievement/bulk-issue/` | — | write (not load-tested) | — | — | — | builds a spreadsheet/CSV in the request (api/dashboard/achievement/achievement_views.py:1096); query inside a loop (api/dashboard/achievement/achievement_views.py:1136,1136) | L-59 |
+| 612 | GET | `dashboard/achievement/bulk-issue/template/` | Admin | 0 → 0 | — | — | 4.7 KB | builds a spreadsheet/CSV in the request (api/dashboard/achievement/achievement_views.py:1186) | — |
+| 613 | GET | `dashboard/achievement/issued-log/` | Admin | 2 → 2 | — | 10 (paged) | 2.9 KB | — | — |
+| 614 | POST | `dashboard/achievement/bulk-claim/` | — | write (not load-tested) | — | — | — | — | — |
+| 615 | GET | `dashboard/skill/` | Admin | 2 → 2 | — | 10 (paged) | 3.0 KB | — | — |
+| 616 | POST | `dashboard/skill/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 617 | GET | `dashboard/skill/dropdown/` | Admin | 1 → 1 | — | 84 | 13.3 KB | returns every row (no paging) | M-65 |
+| 618 | GET | `dashboard/skill/<str:skill_id>/` | Admin | 2 → 2 | — | — | 0.4 KB | — | — |
+| 619 | PUT | `dashboard/skill/<str:skill_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 620 | DELETE | `dashboard/skill/<str:skill_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 621 | GET | `dashboard/skill/<str:skill_id>/tasks/` | Admin | 2 → 2 | — | 0 | 0.4 KB | — | — |
+| 622 | GET | `dashboard/media-content/office-hours/` | Admin | 2 → 2 | — | 10 (paged) | 6.1 KB | per-row method fields: OfficeHoursReadSerializer: interest_groups | — |
+| 623 | POST | `dashboard/media-content/office-hours/` | — | write (not load-tested) | — | — | — | — | — |
+| 624 | GET | `dashboard/media-content/office-hours/<str:record_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: OfficeHoursReadSerializer: interest_groups | — |
+| 625 | PATCH | `dashboard/media-content/office-hours/<str:record_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 626 | DELETE | `dashboard/media-content/office-hours/<str:record_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 627 | GET | `dashboard/media-content/salt-mango-tree/` | Admin | 2 → 2 | — | 10 (paged) | 5.5 KB | — | — |
+| 628 | POST | `dashboard/media-content/salt-mango-tree/` | — | write (not load-tested) | — | — | — | — | — |
+| 629 | GET | `dashboard/media-content/salt-mango-tree/<str:record_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 630 | PATCH | `dashboard/media-content/salt-mango-tree/<str:record_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 631 | DELETE | `dashboard/media-content/salt-mango-tree/<str:record_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 632 | GET | `dashboard/media-content/inspiration-station/` | Admin | 1 → 2 | — | 10 (paged) | 5.5 KB | — | — |
+| 633 | POST | `dashboard/media-content/inspiration-station/` | — | write (not load-tested) | — | — | — | — | — |
+| 634 | GET | `dashboard/media-content/inspiration-station/<str:record_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 635 | PATCH | `dashboard/media-content/inspiration-station/<str:record_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 636 | DELETE | `dashboard/media-content/inspiration-station/<str:record_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 637 | GET | `dashboard/media-content/grab-your-superpowers/` | Admin | 2 → 2 | — | 10 (paged) | 5.8 KB | — | — |
+| 638 | POST | `dashboard/media-content/grab-your-superpowers/` | — | write (not load-tested) | — | — | — | — | — |
+| 639 | GET | `dashboard/media-content/grab-your-superpowers/<str:record_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 640 | PATCH | `dashboard/media-content/grab-your-superpowers/<str:record_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 641 | DELETE | `dashboard/media-content/grab-your-superpowers/<str:record_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 642 | POST | `dashboard/media-content/bulk/import/` | — | write (not load-tested) | — | — | — | — | — |
+| 643 | GET | `dashboard/media-content/bulk/export/<str:content_type>/` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: OfficeHoursReadSerializer: interest_groups | — |
+| 644 | GET | `dashboard/community-partner/` | Admin | 8 → 12 | 10× `ig_community_partner_link` | 10 (paged) | 5.0 KB | per-row method fields: CommunityPartnerReadSerializer: interest_groups | M-61 |
+| 645 | POST | `dashboard/community-partner/` | — | write (not load-tested) | — | — | — | — | — |
+| 646 | GET | `dashboard/community-partner/<str:partner_id>/` | Admin | 2 → 2 | — | 1 | 0.6 KB | per-row method fields: CommunityPartnerReadSerializer: interest_groups | — |
+| 647 | PATCH | `dashboard/community-partner/<str:partner_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 648 | DELETE | `dashboard/community-partner/<str:partner_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 649 | GET | `dashboard/category/` | Admin | 8 → 22 | 20× `user` | 10 (paged) | 5.4 KB | — | M-61 |
+| 650 | POST | `dashboard/category/` | — | write (not load-tested) | — | — | — | — | — |
+| 651 | PUT | `dashboard/category/` | — | write (not load-tested) | — | — | — | — | — |
+| 652 | PATCH | `dashboard/category/` | — | write (not load-tested) | — | — | — | — | — |
+| 653 | DELETE | `dashboard/category/` | — | write (not load-tested) | — | — | — | — | — |
+| 654 | GET | `dashboard/category/<str:category_id>/` | Admin | 3 → 3 | — | — | 0.6 KB | — | — |
+| 655 | POST | `dashboard/category/<str:category_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 656 | PUT | `dashboard/category/<str:category_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 657 | PATCH | `dashboard/category/<str:category_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 658 | DELETE | `dashboard/category/<str:category_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 659 | GET | `dashboard/mentor/opportunities/` | Mentor | 2 → 21 | 6× `interest_group` | 6 (paged) | 5.4 KB | — | M-61 |
+| 660 | POST | `dashboard/mentor/opportunities/` | — | write (not load-tested) | — | — | — | — | — |
+| 661 | GET | `dashboard/mentor/opportunities/public/` | Admin | 1 → 1 | — | 0 (paged) | 0.2 KB | — | — |
+| 662 | GET | `dashboard/mentor/opportunities/<str:opportunity_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 663 | PATCH | `dashboard/mentor/opportunities/<str:opportunity_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 664 | DELETE | `dashboard/mentor/opportunities/<str:opportunity_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 665 | POST | `dashboard/mentor/opportunities/<str:opportunity_id>/publish/` | — | write (not load-tested) | — | — | — | — | — |
+| 666 | POST | `dashboard/mentor/opportunities/<str:opportunity_id>/close/` | — | write (not load-tested) | — | — | — | — | — |
+| 667 | GET | `dashboard/mentor/public/profile/<str:mentor_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 668 | GET | `dashboard/mentor/public/availability/<str:mentor_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 669 | GET | `dashboard/mentor/overview/` | Mentor | 10 → 10 | — | 1 | 0.4 KB | response cached; no index: karma_activity_log(mentor_review_status); no index: wallet(karma_last_updated_at) | M-64 |
+| 670 | GET | `dashboard/mentor/persona/current/` | Mentor | 2 → 2 | — | 3 | 0.4 KB | — | — |
+| 671 | POST | `dashboard/mentor/register/` | — | write (not load-tested) | — | — | — | — | — |
+| 672 | PATCH | `dashboard/mentor/register/` | — | write (not load-tested) | — | — | — | — | — |
+| 673 | GET | `dashboard/mentor/status/` | Mentor | 5 → 5 | — | 1 | 0.3 KB | — | — |
+| 674 | GET | `dashboard/mentor/profile/` | Mentor | 6 → 6 | — | 1 | 0.8 KB | — | — |
+| 675 | PATCH | `dashboard/mentor/profile/` | — | write (not load-tested) | — | — | — | — | — |
+| 676 | GET | `dashboard/mentor/activity/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 677 | GET | `dashboard/mentor/analytics/personal/` | Mentor | 9 → 9 | 3× `mentorship_session` | 0 | 0.2 KB | — | — |
+| 678 | GET | `dashboard/mentor/profile/completion/` | Mentor | 3 → 3 | — | — | 0.2 KB | — | — |
+| 679 | GET | `dashboard/mentor/list/` | Admin | 4 → 4 | — | 10 (paged) | 5.5 KB | — | — |
+| 680 | GET | `dashboard/mentor/roster/` | Admin | 6 → 6 | — | 1 (paged) | 0.8 KB | — | — |
+| 681 | GET | `dashboard/mentor/change-requests/` | Admin | 2 → 2 | — | 0 (paged) | 0.2 KB | — | — |
+| 682 | PATCH | `dashboard/mentor/verify/<str:mentor_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 683 | GET | `dashboard/mentor/detail/<str:mentor_id>/` | Admin | 2 → 2 | — | 1 | 0.5 KB | — | — |
+| 684 | POST | `dashboard/mentor/session/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 685 | GET | `dashboard/mentor/session/list/` | Mentor | 1 → 1 | — | 0 (paged) | 0.2 KB | per-row method fields: SessionListSerializer: entity_name | — |
+| 686 | GET | `dashboard/mentor/session/list/<str:session_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: SessionListSerializer: entity_name | — |
+| 687 | PATCH | `dashboard/mentor/session/update/<str:session_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 688 | DELETE | `dashboard/mentor/session/update/<str:session_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 689 | POST | `dashboard/mentor/session/complete/<str:session_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 690 | GET | `dashboard/mentor/session/available/` | Admin | 1 → 1 | — | 0 (paged) | 0.2 KB | per-row method fields: SessionListSerializer: entity_name | — |
+| 691 | GET | `dashboard/mentor/session/admin/list/` | Admin | 11 → 12 | 10× `user` | 10 (paged) | 8.0 KB | per-row method fields: SessionListSerializer: entity_name | M-61 |
+| 692 | PATCH | `dashboard/mentor/session/admin/verify/<str:session_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 693 | GET | `dashboard/mentor/availability/` | Mentor | 1 → 3 | — | 1 (paged) | 0.5 KB | — | — |
+| 694 | POST | `dashboard/mentor/availability/` | — | write (not load-tested) | — | — | — | — | — |
+| 695 | PATCH | `dashboard/mentor/availability/` | — | write (not load-tested) | — | — | — | — | — |
+| 696 | DELETE | `dashboard/mentor/availability/` | — | write (not load-tested) | — | — | — | — | — |
+| 697 | GET | `dashboard/mentor/availability/<str:slot_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 698 | POST | `dashboard/mentor/availability/<str:slot_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 699 | PATCH | `dashboard/mentor/availability/<str:slot_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 700 | DELETE | `dashboard/mentor/availability/<str:slot_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 701 | POST | `dashboard/mentor/session/participation/join/<str:session_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 702 | GET | `dashboard/mentor/session/participant/history/` | Lead Enabler | 1 → 2 | — | 1 (paged) | 0.9 KB | per-row method fields: ParticipantListSerializer: session_entity_name | — |
+| 703 | POST | `dashboard/mentor/session/participant/add/<str:session_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 704 | GET | `dashboard/mentor/session/participant/list/<str:session_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: ParticipantListSerializer: session_entity_name | — |
+| 705 | PATCH | `dashboard/mentor/session/participant/update/<str:link_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 706 | PATCH | `dashboard/mentor/session/participant/feedback/<str:session_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 707 | GET | `dashboard/mentor/tasks/ig-dropdown/` | Mentor | 1 → 1 | — | 1 | 0.1 KB | — | — |
+| 708 | GET | `dashboard/mentor/tasks/` | Mentor | 3 → 4 | — | 18 (paged) | 4.3 KB | no index: task_list(requested_by); per-row method fields: MentorTaskListSerializer: skills | M-64 |
+| 709 | POST | `dashboard/mentor/tasks/` | — | write (not load-tested) | — | — | — | — | — |
+| 710 | GET | `dashboard/mentor/tasks/<str:task_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: MentorTaskListSerializer: skills | — |
+| 711 | PUT | `dashboard/mentor/tasks/<str:task_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 712 | DELETE | `dashboard/mentor/tasks/<str:task_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 713 | POST | `dashboard/mentor/admin/assign/` | — | write (not load-tested) | — | — | — | — | — |
+| 714 | DELETE | `dashboard/mentor/admin/assign/` | — | write (not load-tested) | — | — | — | insert/update inside a loop (api/dashboard/mentor/mentor_views.py:1186,1199); query inside a loop (api/dashboard/mentor/mentor_views.py:1199) | L-59 |
+| 715 | POST | `dashboard/mentor/admin/assign/<str:user_muid>/` | — | write (not load-tested) | — | — | — | — | — |
+| 716 | DELETE | `dashboard/mentor/admin/assign/<str:user_muid>/` | — | write (not load-tested) | — | — | — | insert/update inside a loop (api/dashboard/mentor/mentor_views.py:1186,1199); query inside a loop (api/dashboard/mentor/mentor_views.py:1199) | L-59 |
+| 717 | POST | `dashboard/mentor/admin/deactivate/<str:user_mentor_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 718 | POST | `dashboard/mentor/admin/reactivate/<str:user_mentor_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 719 | GET | `dashboard/mentor/<str:mentor_id>/preferred-igs/` | Mentor | 2 → 2 | — | 1 | 0.5 KB | — | — |
+| 720 | PATCH | `dashboard/mentor/<str:mentor_id>/preferred-igs/` | — | write (not load-tested) | — | — | — | — | — |
+| 721 | GET | `dashboard/mentor/<str:mentor_id>/grants/` | Admin | 5 → 5 | 3× `user` | 3 | 0.8 KB | — | — |
+| 722 | DELETE | `dashboard/mentor/<str:mentor_id>/grants/<str:grant_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 723 | POST | `dashboard/mentor/change-company/` | — | write (not load-tested) | — | — | — | — | — |
+| 724 | POST | `dashboard/mentor/session/student/request/` | — | write (not load-tested) | — | — | — | — | — |
+| 725 | GET | `dashboard/mentor/session/student/my-requests/` | Mentor | 1 → 6 | — | 2 (paged) | 1.4 KB | per-row method fields: StudentSessionRequestListSerializer: entity_name | — |
+| 726 | GET | `dashboard/mentor/session/student-requests/` | Mentor | 3 → 3 | — | 0 (paged) | 0.2 KB | per-row method fields: StudentSessionRequestListSerializer: entity_name | — |
+| 727 | PATCH | `dashboard/mentor/session/student-requests/<str:session_id>/verify/` | — | write (not load-tested) | — | — | — | — | — |
+| 728 | GET | `dashboard/mentor/persona/status/` | Mentor | 1 → 1 | — | — | 0.2 KB | — | — |
+| 729 | POST | `dashboard/mentor/persona/switch/` | — | write (not load-tested) | — | — | — | — | — |
+| 730 | GET | `dashboard/intern/timesheets/` | Intern | 1 → 1 | — | 0 (paged) | 0.2 KB | — | — |
+| 731 | POST | `dashboard/intern/timesheets/` | — | write (not load-tested) | — | — | — | — | — |
+| 732 | PATCH | `dashboard/intern/timesheets/` | — | write (not load-tested) | — | — | — | insert/update inside a loop (api/dashboard/intern/timesheet/timesheet_views.py:205); query inside a loop (api/dashboard/intern/timesheet/timesheet_views.py:205) | L-59 |
+| 733 | GET | `dashboard/intern/timesheets/prefill/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 734 | GET | `dashboard/intern/timesheets/today/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 735 | GET | `dashboard/intern/timesheets/history/` | Intern | 1 → 1 | — | 0 (paged) | 0.2 KB | — | — |
+| 736 | GET | `dashboard/intern/timesheets/summary/` | Intern | 1 → 1 | — | — | 0.1 KB | — | — |
+| 737 | GET | `dashboard/intern/timesheets/<str:timesheet_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 738 | POST | `dashboard/intern/timesheets/<str:timesheet_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 739 | PATCH | `dashboard/intern/timesheets/<str:timesheet_id>/` | — | write (not load-tested) | — | — | — | insert/update inside a loop (api/dashboard/intern/timesheet/timesheet_views.py:205); query inside a loop (api/dashboard/intern/timesheet/timesheet_views.py:205) | L-59 |
+| 740 | GET | `dashboard/intern/reviews/` | Intern | 1 → 1 | — | 0 (paged) | 0.2 KB | — | — |
+| 741 | POST | `dashboard/intern/reviews/` | — | write (not load-tested) | — | — | — | — | — |
+| 742 | PATCH | `dashboard/intern/reviews/` | — | write (not load-tested) | — | — | — | — | — |
+| 743 | GET | `dashboard/intern/reviews/prefill/` | Intern | 1 → 1 | — | 0 | 0.2 KB | — | — |
+| 744 | GET | `dashboard/intern/reviews/current/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 745 | GET | `dashboard/intern/reviews/history/` | Intern | 1 → 1 | — | 0 (paged) | 0.2 KB | — | — |
+| 746 | GET | `dashboard/intern/reviews/<str:review_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 747 | POST | `dashboard/intern/reviews/<str:review_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 748 | PATCH | `dashboard/intern/reviews/<str:review_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 749 | GET | `dashboard/intern/overview/status/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 750 | GET | `dashboard/intern/overview/activity/` | Intern | 1 → 1 | — | 0 (paged) | 0.2 KB | no index: task_list(hashtag) | M-64 |
+| 751 | GET | `dashboard/intern/overview/leaderboard/top/` | Intern | 4 → 4 | — | 3 | 1.0 KB | — | — |
+| 752 | GET | `dashboard/intern/leaderboard/` | Admin | 7 → 7 | — | 10 (paged) | 3.6 KB | no index: task_list(hashtag) | M-64 |
+| 753 | GET | `dashboard/intern/leaderboard/me/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 754 | GET | `dashboard/intern/tasks/categories/` | Admin | 0 → 0 | — | 6 | 0.3 KB | — | — |
+| 755 | GET | `dashboard/intern/tasks/mine/` | Intern | 1 → 1 | — | 0 (paged) | 0.2 KB | — | — |
+| 756 | PATCH | `dashboard/intern/tasks/<str:task_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 757 | PATCH | `dashboard/intern/tasks/<str:task_id>/submit/` | — | write (not load-tested) | — | — | — | — | — |
+| 758 | GET | `dashboard/intern/tasks/<str:task_id>/detail/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 759 | GET | `dashboard/intern/leave/` | Intern | 1 → 1 | — | 0 (paged) | 0.2 KB | — | — |
+| 760 | POST | `dashboard/intern/leave/` | — | write (not load-tested) | — | — | — | — | — |
+| 761 | PATCH | `dashboard/intern/leave/` | — | write (not load-tested) | — | — | — | — | — |
+| 762 | GET | `dashboard/intern/leave/history/` | Intern | 1 → 1 | — | 0 (paged) | 0.2 KB | — | — |
+| 763 | GET | `dashboard/intern/leave/balance/` | Intern | 4 → 4 | 4× `intern_leave_request` | — | 0.1 KB | — | — |
+| 764 | GET | `dashboard/intern/leave/<str:leave_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 765 | POST | `dashboard/intern/leave/<str:leave_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 766 | PATCH | `dashboard/intern/leave/<str:leave_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 767 | GET | `dashboard/intern/leave/<str:leave_id>/cancel/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 768 | POST | `dashboard/intern/leave/<str:leave_id>/cancel/` | — | write (not load-tested) | — | — | — | — | — |
+| 769 | PATCH | `dashboard/intern/leave/<str:leave_id>/cancel/` | — | write (not load-tested) | — | — | — | — | — |
+| 770 | GET | `dashboard/intern/guilds/` | Admin | 0 → 0 | — | 4 | 0.1 KB | — | — |
+| 771 | GET | `dashboard/intern/minutes/` | Admin | 2 → 2 | — | 10 (paged) | 8.0 KB | — | — |
+| 772 | POST | `dashboard/intern/minutes/` | — | write (not load-tested) | — | — | — | — | — |
+| 773 | PUT | `dashboard/intern/minutes/` | — | write (not load-tested) | — | — | — | — | — |
+| 774 | DELETE | `dashboard/intern/minutes/` | — | write (not load-tested) | — | — | — | — | — |
+| 775 | GET | `dashboard/intern/minutes/<str:minute_id>/` | Admin | 2 → 2 | — | — | 0.8 KB | — | — |
+| 776 | POST | `dashboard/intern/minutes/<str:minute_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 777 | PUT | `dashboard/intern/minutes/<str:minute_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 778 | DELETE | `dashboard/intern/minutes/<str:minute_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 779 | GET | `dashboard/manage-interns/reviews/timesheets/<str:timesheet_id>/review/` | Admin | 2 → 2 | — | — | 0.7 KB | — | — |
+| 780 | PATCH | `dashboard/manage-interns/reviews/timesheets/<str:timesheet_id>/review/` | — | write (not load-tested) | — | — | — | — | — |
+| 781 | GET | `dashboard/manage-interns/reviews/reviews/<str:review_id>/review/` | Admin | 2 → 2 | — | — | 0.9 KB | — | — |
+| 782 | PATCH | `dashboard/manage-interns/reviews/reviews/<str:review_id>/review/` | — | write (not load-tested) | — | — | — | — | — |
+| 783 | GET | `dashboard/manage-interns/reviews/timesheets/` | Admin | 5 → 12 | 10× `user` | 10 (paged) | 6.2 KB | — | M-61 |
+| 784 | GET | `dashboard/manage-interns/reviews/` | Admin | 5 → 12 | 10× `user` | 10 (paged) | 8.7 KB | — | M-61 |
+| 785 | GET | `dashboard/manage-interns/tasks/` | Admin | 2 → 2 | — | 10 (paged) | 10.0 KB | — | — |
+| 786 | POST | `dashboard/manage-interns/tasks/` | — | write (not load-tested) | — | — | — | — | — |
+| 787 | PATCH | `dashboard/manage-interns/tasks/` | — | write (not load-tested) | — | — | — | — | — |
+| 788 | DELETE | `dashboard/manage-interns/tasks/` | — | write (not load-tested) | — | — | — | — | — |
+| 789 | GET | `dashboard/manage-interns/tasks/by-intern/<str:muid>/` | Admin | 2 → 2 | — | 0 (paged) | 0.2 KB | — | — |
+| 790 | POST | `dashboard/manage-interns/tasks/<str:task_id>/verify/` | — | write (not load-tested) | — | — | — | — | — |
+| 791 | GET | `dashboard/manage-interns/tasks/<str:task_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 792 | POST | `dashboard/manage-interns/tasks/<str:task_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 793 | PATCH | `dashboard/manage-interns/tasks/<str:task_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 794 | DELETE | `dashboard/manage-interns/tasks/<str:task_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 795 | GET | `dashboard/manage-interns/leave/` | Admin | 2 → 2 | — | 10 (paged) | 5.9 KB | — | — |
+| 796 | GET | `dashboard/manage-interns/leave/<str:leave_id>/` | Admin | 2 → 2 | — | — | 0.6 KB | — | — |
+| 797 | PATCH | `dashboard/manage-interns/leave/<str:leave_id>/review/` | — | write (not load-tested) | — | — | — | — | — |
+| 798 | GET | `dashboard/manage-interns/status/` | Admin | 2 → 2 | — | — | 0.1 KB | — | — |
+| 799 | GET | `dashboard/manage-interns/interns/export/` | Admin | 1 → 1 | — | — | 9.8 KB | builds a spreadsheet/CSV in the request (api/dashboard/manage_interns/interns_views.py:188) | — |
+| 800 | GET | `dashboard/manage-interns/interns/import/template/` | Admin | 0 → 0 | — | — | 4.7 KB | builds a spreadsheet/CSV in the request (api/dashboard/manage_interns/interns_views.py:213) | — |
+| 801 | POST | `dashboard/manage-interns/interns/import/` | — | write (not load-tested) | — | — | — | builds a spreadsheet/CSV in the request (api/dashboard/manage_interns/interns_views.py:260); query inside a loop (api/dashboard/manage_interns/interns_views.py:330,330,340); insert/update inside a loop (api/dashboard/manage_interns/interns_views.py:349,359) | L-59 |
+| 802 | GET | `dashboard/manage-interns/interns/` | Admin | 3 → 3 | — | 10 (paged) | 5.4 KB | — | L-58 |
+| 803 | POST | `dashboard/manage-interns/interns/` | — | write (not load-tested) | — | — | — | — | — |
+| 804 | PATCH | `dashboard/manage-interns/interns/` | — | write (not load-tested) | — | — | — | — | — |
+| 805 | DELETE | `dashboard/manage-interns/interns/` | — | write (not load-tested) | — | — | — | — | — |
+| 806 | GET | `dashboard/manage-interns/interns/<str:intern_id>/` | Admin | 2 → 2 | — | 0 | 0.6 KB | — | — |
+| 807 | POST | `dashboard/manage-interns/interns/<str:intern_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 808 | PATCH | `dashboard/manage-interns/interns/<str:intern_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 809 | DELETE | `dashboard/manage-interns/interns/<str:intern_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 810 | POST | `dashboard/company/register/` | — | write (not load-tested) | — | — | — | — | — |
+| 811 | PATCH | `dashboard/company/register/` | — | write (not load-tested) | — | — | — | — | — |
+| 812 | GET | `dashboard/company/summary/` | Admin | 7 → 7 | 4× `company` | — | 0.2 KB | no index: task_list(submitted_by_company_id) | M-64 |
+| 813 | GET | `dashboard/company/home-summary/` | Mentor | 34 → 61 | 47× `user` | 47 | 8.0 KB | — | M-63 |
+| 814 | GET | `dashboard/company/status/` | Company | 2 → 2 | — | 0 | 1.1 KB | — | — |
+| 815 | GET | `dashboard/company/profile/` | Mentor | 5 → 5 | — | 0 | 1.1 KB | — | — |
+| 816 | PATCH | `dashboard/company/profile/` | — | write (not load-tested) | — | — | — | — | — |
+| 817 | GET | `dashboard/company/profile/public/<str:slug>/` | Admin | 4 → 4 | — | 0 | 0.6 KB | per-row method fields: PublicCompanyProfileSerializer: collaboration_summary | — |
+| 818 | GET | `dashboard/company/profile/public/<str:slug>/jobs/` | Admin | 6 → 6 | — | 25 (paged) | 7.5 KB | — | — |
+| 819 | GET | `dashboard/company/list/` | Admin | 12 → 12 | 10× `user` | 10 (paged) | 6.7 KB | — | M-61 |
+| 820 | GET | `dashboard/company/jobs/` | Company | 6 → 43 | 20× `user` | 10 (paged) | 6.3 KB | — | M-61 |
+| 821 | POST | `dashboard/company/jobs/` | — | write (not load-tested) | — | — | — | — | — |
+| 822 | GET | `dashboard/company/jobs/pending/` | Company | 2 → 2 | — | 0 (paged) | 0.2 KB | — | — |
+| 823 | GET | `dashboard/company/jobs/all/` | Admin | 9 → 9 | — | 25 (paged) | 13.8 KB | — | — |
+| 824 | GET | `dashboard/company/jobs/<str:job_id>/` | Mentor | 8 → 8 | — | 25 | 7.4 KB | — | — |
+| 825 | PATCH | `dashboard/company/jobs/<str:job_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 826 | DELETE | `dashboard/company/jobs/<str:job_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 827 | POST | `dashboard/company/jobs/<str:job_id>/approve/` | — | write (not load-tested) | — | — | — | — | — |
+| 828 | POST | `dashboard/company/jobs/<str:job_id>/reject/` | — | write (not load-tested) | — | — | — | — | — |
+| 829 | POST | `dashboard/company/jobs/<str:job_id>/request-changes/` | — | write (not load-tested) | — | — | — | — | — |
+| 830 | POST | `dashboard/company/jobs/<str:job_id>/view/` | — | write (not load-tested) | — | — | — | — | — |
+| 831 | GET | `dashboard/company/jobs/<str:job_id>/analytics/` | Mentor | 7 → 7 | — | — | 0.3 KB | — | — |
+| 832 | GET | `dashboard/company/jobs/<str:job_id>/apply/` | Mentor | 6 → 17 | 10× `user` | 10 (paged) | 2.9 KB | — | M-61 |
+| 833 | POST | `dashboard/company/jobs/<str:job_id>/apply/` | — | write (not load-tested) | — | — | — | — | — |
+| 834 | GET | `dashboard/company/jobs/<str:job_id>/applications/` | Mentor | 6 → 17 | 10× `user` | 10 (paged) | 2.9 KB | — | M-61 |
+| 835 | POST | `dashboard/company/jobs/<str:job_id>/applications/` | — | write (not load-tested) | — | — | — | — | — |
+| 836 | GET | `dashboard/company/applications/me/` | Student | 1 → 33 | 10× `company_jobs` | 10 (paged) | 15.2 KB | — | M-61 |
+| 837 | PATCH | `dashboard/company/applications/<str:app_id>/status/` | — | write (not load-tested) | — | — | — | — | — |
+| 838 | DELETE | `dashboard/company/applications/<str:app_id>/withdraw/` | — | write (not load-tested) | — | — | — | — | — |
+| 839 | PATCH | `dashboard/company/applications/<str:app_id>/resubmit/` | — | write (not load-tested) | — | — | — | — | — |
+| 840 | GET | `dashboard/company/mulearners/` | Mentor | 8 → 8 | — | 10 (paged) | 1.9 KB | — | — |
+| 841 | GET | `dashboard/company/mulearners/shortlist/` | Mentor | 5 → 149 | 72× `user_organization_link` | 24 | 5.0 KB | — | M-63, M-65 |
+| 842 | POST | `dashboard/company/mulearners/shortlist/` | — | write (not load-tested) | — | — | — | — | — |
+| 843 | DELETE | `dashboard/company/mulearners/shortlist/` | — | write (not load-tested) | — | — | — | — | — |
+| 844 | GET | `dashboard/company/mulearners/shortlist/<str:user_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 845 | POST | `dashboard/company/mulearners/shortlist/<str:user_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 846 | DELETE | `dashboard/company/mulearners/shortlist/<str:user_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 847 | GET | `dashboard/company/analytics/gigs/` | Mentor | 10 → 10 | — | — | 0.3 KB | — | — |
+| 848 | GET | `dashboard/company/analytics/tasks/` | Mentor | 9 → 9 | — | — | 0.3 KB | no index: task_list(submitted_by_company_id) | M-64 |
+| 849 | GET | `dashboard/company/talent-pool/analytics/` | Mentor | 27 → 54 | 47× `user` | 47 | 7.4 KB | — | M-63 |
+| 850 | GET | `dashboard/company/analytics/campus/trend/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 851 | GET | `dashboard/company/analytics/campus/` | Mentor | 7 → 7 | — | 7 | 0.9 KB | no index: events(organiser_org_id,organiser_type); no index: task_list(submitted_by_company_id) | M-64 |
+| 852 | GET | `dashboard/company/talent-pool/insights/` | Mentor | 7 → 8 | — | 10 | 2.3 KB | builds a spreadsheet/CSV in the request (api/dashboard/company/analytics_views.py:447) | — |
+| 853 | POST | `dashboard/company/feedback/` | — | write (not load-tested) | — | — | — | — | — |
+| 854 | GET | `dashboard/company/feedback/list/` | Mentor | 5 → 6 | — | 10 (paged) | 2.4 KB | — | — |
+| 855 | GET | `dashboard/company/impact-report/` | Mentor | 11 → 11 | — | — | 0.5 KB | no index: events(organiser_org_id,organiser_type); no index: task_list(submitted_by_company_id) | M-64 |
+| 856 | PATCH | `dashboard/company/impact-report/publish/` | — | write (not load-tested) | — | — | — | — | — |
+| 857 | GET | `dashboard/company/collaborations/` | Company | 2 → 23 | 10× `company` | 10 (paged) | 5.8 KB | — | M-61 |
+| 858 | POST | `dashboard/company/collaborations/` | — | write (not load-tested) | — | — | — | — | — |
+| 859 | GET | `dashboard/company/collaborations/discover/` | Admin | 2 → 12 | 10× `user` | 10 (paged) | 5.8 KB | — | M-61 |
+| 860 | POST | `dashboard/company/collaborations/<str:collaboration_id>/respond/` | — | write (not load-tested) | — | — | — | — | — |
+| 861 | DELETE | `dashboard/company/collaborations/<str:collaboration_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 862 | POST | `dashboard/company/ig-sponsorship/<str:ig_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 863 | PATCH | `dashboard/company/ig-sponsorship/<str:ig_id>/review/` | — | write (not load-tested) | — | — | — | — | — |
+| 864 | GET | `dashboard/company/ig-sponsorship/<str:ig_id>/metrics/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 865 | GET | `dashboard/company/events/templates/` | Mentor | 5 → 5 | — | 25 | 8.0 KB | returns every row (no paging) | M-65 |
+| 866 | POST | `dashboard/company/events/templates/` | — | write (not load-tested) | — | — | — | — | — |
+| 867 | DELETE | `dashboard/company/events/templates/<str:template_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 868 | POST | `dashboard/company/admin-link/` | — | write (not load-tested) | — | — | — | — | — |
+| 869 | GET | `dashboard/company/admin-link/list/` | Company | 2 → 2 | — | 19 | 4.9 KB | — | — |
+| 870 | POST | `dashboard/company/admin-link/<str:link_id>/respond/` | — | write (not load-tested) | — | — | — | — | — |
+| 871 | DELETE | `dashboard/company/admin-link/<str:link_id>/leave/` | — | write (not load-tested) | — | — | — | — | — |
+| 872 | DELETE | `dashboard/company/admin-link/<str:link_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 873 | POST | `dashboard/company/mentor/nominate/` | — | write (not load-tested) | — | — | — | — | — |
+| 874 | POST | `dashboard/company/mentor/apply/` | — | write (not load-tested) | — | — | — | — | — |
+| 875 | GET | `dashboard/company/mentor/list/` | Company | 3 → 3 | — | 0 | 0.1 KB | — | — |
+| 876 | GET | `dashboard/company/tasks/` | Mentor | 5 → 16 | 10× `task_skill_link` | 10 (paged) | 7.8 KB | no index: task_list(submitted_by_company_id); per-row method fields: CompanyTaskListSerializer: skills | M-61, M-64 |
+| 877 | POST | `dashboard/company/tasks/` | — | write (not load-tested) | — | — | — | — | — |
+| 878 | GET | `dashboard/company/tasks/templates/` | Mentor | 5 → 5 | — | 25 | 5.4 KB | returns every row (no paging) | M-65 |
+| 879 | POST | `dashboard/company/tasks/templates/` | — | write (not load-tested) | — | — | — | — | — |
+| 880 | DELETE | `dashboard/company/tasks/templates/<str:template_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 881 | GET | `dashboard/company/tasks/<str:task_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: CompanyTaskListSerializer: skills | — |
+| 882 | PUT | `dashboard/company/tasks/<str:task_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 883 | PATCH | `dashboard/company/tasks/<str:task_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 884 | DELETE | `dashboard/company/tasks/<str:task_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 885 | POST | `dashboard/company/deactivate/` | — | write (not load-tested) | — | — | — | — | — |
+| 886 | POST | `dashboard/company/<str:company_id>/deactivate/` | — | write (not load-tested) | — | — | — | — | — |
+| 887 | POST | `dashboard/company/<str:company_id>/reactivate/` | — | write (not load-tested) | — | — | — | — | — |
+| 888 | GET | `dashboard/company/<str:company_id>/` | Admin | 2 → 2 | — | 0 | 1.1 KB | — | — |
+| 889 | PATCH | `dashboard/company/verify/<str:company_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 890 | GET | `dashboard/feature/grit-meter/` | Admin | 1 → 1 | — | — | 0.1 KB | — | — |
+| 891 | POST | `dashboard/feature/grit-meter/` | — | write (not load-tested) | — | — | — | — | — |
+| 892 | GET | `dashboard/career-lab/hiring/` | Admin | 2 → 16 | 14× `user` | 10 (paged) | 8.8 KB | — | M-61 |
+| 893 | POST | `dashboard/career-lab/hiring/` | — | write (not load-tested) | — | — | — | — | — |
+| 894 | GET | `dashboard/career-lab/hiring/csv/` | Admin | 1 → 51 | 50× `user` | — | 12.0 KB | — | M-62 |
+| 895 | POST | `dashboard/career-lab/hiring/csv/` | — | write (not load-tested) | — | — | — | — | — |
+| 896 | GET | `dashboard/career-lab/hiring/<str:hiring_id>/` | Admin | 1 → 3 | — | — | 1.0 KB | — | — |
+| 897 | PUT | `dashboard/career-lab/hiring/<str:hiring_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 898 | DELETE | `dashboard/career-lab/hiring/<str:hiring_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 899 | POST | `integrations/kkem/login/` | — | write (not load-tested) | — | — | — | — | — |
+| 900 | POST | `integrations/kkem/authorization/` | — | write (not load-tested) | — | — | — | sends e-mail in the request (api/integrations/kkem/kkem_views.py:130) | M-70 |
+| 901 | PATCH | `integrations/kkem/authorization/` | — | write (not load-tested) | — | — | — | — | — |
+| 902 | POST | `integrations/kkem/authorization/<str:token>/` | — | write (not load-tested) | — | — | — | sends e-mail in the request (api/integrations/kkem/kkem_views.py:130) | M-70 |
+| 903 | PATCH | `integrations/kkem/authorization/<str:token>/` | — | write (not load-tested) | — | — | — | — | — |
+| 904 | GET | `integrations/kkem/user/status/<str:encrypted_data>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 905 | GET | `integrations/kkem/user/<str:encrypted_data>/` | — | not measured (no successful response in test data; 400) | — | — | — | outbound HTTP in the request (api/integrations/kkem/kkem_views.py:247) | — |
+| 906 | GET | `integrations/kkem/users/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 907 | GET | `integrations/kkem/users/<str:muid>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 908 | GET | `integrations/kkem/hackathon-stats/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 909 | POST | `integrations/wadhwani/auth-token/` | — | write (not load-tested) | — | — | — | outbound HTTP in the request (api/integrations/wadhwani/wadhwani_views.py:35) | — |
+| 910 | POST | `integrations/wadhwani/user-login/` | — | write (not load-tested) | — | — | — | outbound HTTP in the request (api/integrations/wadhwani/wadhwani_views.py:90) | — |
+| 911 | POST | `integrations/wadhwani/course-details/` | — | write (not load-tested) | — | — | — | outbound HTTP in the request (api/integrations/wadhwani/wadhwani_views.py:133) | — |
+| 912 | POST | `integrations/wadhwani/course-enroll-status/` | — | write (not load-tested) | — | — | — | outbound HTTP in the request (api/integrations/wadhwani/wadhwani_views.py:174) | — |
+| 913 | POST | `integrations/wadhwani/course-quiz-data/` | — | write (not load-tested) | — | — | — | outbound HTTP in the request (api/integrations/wadhwani/wadhwani_views.py:224) | — |
+| 914 | POST | `integrations/qseverse/issue-vc/` | — | write (not load-tested) | — | — | — | outbound HTTP in the request (api/integrations/qseverse/qseverse_views.py:35) | — |
+| 915 | GET | `integrations/qseverse/connected-users/` | Admin | 0 → 0 | — | 0 | 0.1 KB | 1 outbound HTTP call(s); outbound HTTP in the request (api/integrations/qseverse/qseverse_views.py:67) | — |
+| 916 | GET | `integrations/qseverse/connected-users/search` | — | not measured (no successful response in test data; 400) | — | — | — | outbound HTTP in the request (api/integrations/qseverse/qseverse_views.py:100) | — |
+| 917 | GET | `integrations/qseverse/qs-credentials/` | Admin | 0 → 0 | — | 0 | 0.1 KB | 1 outbound HTTP call(s); outbound HTTP in the request (api/integrations/qseverse/qseverse_views.py:135) | — |
+| 918 | GET | `integrations/mufifa/verify-task/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 919 | GET | `url-shortener/create/` | Admin | 3 → 3 | — | 10 (paged) | 10.6 KB | — | — |
+| 920 | POST | `url-shortener/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 921 | PUT | `url-shortener/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 922 | DELETE | `url-shortener/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 923 | GET | `url-shortener/edit/<str:url_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 924 | POST | `url-shortener/edit/<str:url_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 925 | PUT | `url-shortener/edit/<str:url_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 926 | DELETE | `url-shortener/edit/<str:url_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 927 | GET | `url-shortener/list/` | Admin | 3 → 3 | — | 10 (paged) | 10.6 KB | — | — |
+| 928 | POST | `url-shortener/list/` | — | write (not load-tested) | — | — | — | — | — |
+| 929 | PUT | `url-shortener/list/` | — | write (not load-tested) | — | — | — | — | — |
+| 930 | DELETE | `url-shortener/list/` | — | write (not load-tested) | — | — | — | — | — |
+| 931 | GET | `url-shortener/delete/<str:url_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 932 | POST | `url-shortener/delete/<str:url_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 933 | PUT | `url-shortener/delete/<str:url_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 934 | DELETE | `url-shortener/delete/<str:url_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 935 | GET | `url-shortener/get-analytics/<str:url_id>/` | Admin | 4 → 4 | — | 0 | 1.1 KB | — | — |
+| 936 | GET | `protected/organisation/institutes/<str:organisation_type>/<str:district_name>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 937 | GET | `protected/organisation/get-institutes/<str:district_name>/` | Admin | 2 → 2 | — | 0 | 0.1 KB | — | — |
+| 938 | GET | `hackathon/list-hackathons/` | Admin | 1 → 1 | — | 0 | 0.1 KB | per-row method fields: HackathonRetrievalSerializer: editable, is_applied | — |
+| 939 | POST | `hackathon/list-hackathons/` | — | write (not load-tested) | — | — | — | — | — |
+| 940 | PUT | `hackathon/list-hackathons/` | — | write (not load-tested) | — | — | — | — | — |
+| 941 | DELETE | `hackathon/list-hackathons/` | — | write (not load-tested) | — | — | — | — | — |
+| 942 | GET | `hackathon/list-hackathons/upcoming/` | Admin | 1 → 1 | — | 0 | 0.1 KB | per-row method fields: HackathonRetrievalSerializer: editable, is_applied | — |
+| 943 | POST | `hackathon/list-hackathons/upcoming/` | — | write (not load-tested) | — | — | — | — | — |
+| 944 | PUT | `hackathon/list-hackathons/upcoming/` | — | write (not load-tested) | — | — | — | — | — |
+| 945 | DELETE | `hackathon/list-hackathons/upcoming/` | — | write (not load-tested) | — | — | — | — | — |
+| 946 | GET | `hackathon/list-hackathons/<str:hackathon_id>/` | Admin | 3 → 3 | — | — | 0.6 KB | per-row method fields: HackathonRetrievalSerializer: editable, is_applied | — |
+| 947 | POST | `hackathon/list-hackathons/<str:hackathon_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 948 | PUT | `hackathon/list-hackathons/<str:hackathon_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 949 | DELETE | `hackathon/list-hackathons/<str:hackathon_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 950 | GET | `hackathon/info/<str:hackathon_id>/` | Admin | 3 → 3 | — | 1 | 0.8 KB | per-row method fields: HackathonInfoSerializer: form_fields, is_applied | — |
+| 951 | GET | `hackathon/create-hackathon/` | Admin | 1 → 1 | — | 0 | 0.1 KB | per-row method fields: HackathonRetrievalSerializer: editable, is_applied | — |
+| 952 | POST | `hackathon/create-hackathon/` | — | write (not load-tested) | — | — | — | — | — |
+| 953 | PUT | `hackathon/create-hackathon/` | — | write (not load-tested) | — | — | — | — | — |
+| 954 | DELETE | `hackathon/create-hackathon/` | — | write (not load-tested) | — | — | — | — | — |
+| 955 | GET | `hackathon/edit-hackathon/<str:hackathon_id>/` | Admin | 3 → 3 | — | — | 0.6 KB | per-row method fields: HackathonRetrievalSerializer: editable, is_applied | — |
+| 956 | POST | `hackathon/edit-hackathon/<str:hackathon_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 957 | PUT | `hackathon/edit-hackathon/<str:hackathon_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 958 | DELETE | `hackathon/edit-hackathon/<str:hackathon_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 959 | GET | `hackathon/delete-hackathon/<str:hackathon_id>/` | Admin | 3 → 3 | — | — | 0.6 KB | per-row method fields: HackathonRetrievalSerializer: editable, is_applied | — |
+| 960 | POST | `hackathon/delete-hackathon/<str:hackathon_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 961 | PUT | `hackathon/delete-hackathon/<str:hackathon_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 962 | DELETE | `hackathon/delete-hackathon/<str:hackathon_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 963 | PUT | `hackathon/publish-hackathon/<str:hackathon_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 964 | POST | `hackathon/submit-hackathon/` | — | write (not load-tested) | — | — | — | — | — |
+| 965 | GET | `hackathon/list-organiser-hackathons/<str:hackathon_id>/` | Admin | 1 → 1 | — | 0 | 0.1 KB | — | — |
+| 966 | POST | `hackathon/list-organiser-hackathons/<str:hackathon_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 967 | DELETE | `hackathon/list-organiser-hackathons/<str:hackathon_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 968 | GET | `hackathon/add-organiser/<str:hackathon_id>/` | Admin | 1 → 1 | — | 0 | 0.1 KB | — | — |
+| 969 | POST | `hackathon/add-organiser/<str:hackathon_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 970 | DELETE | `hackathon/add-organiser/<str:hackathon_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 971 | GET | `hackathon/delete-organiser/<str:organiser_link_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 972 | POST | `hackathon/delete-organiser/<str:organiser_link_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 973 | DELETE | `hackathon/delete-organiser/<str:organiser_link_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 974 | GET | `hackathon/list-applicants/` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: ListApplicantsSerializer: data | — |
+| 975 | GET | `hackathon/list-applicants/<str:hackathon_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: ListApplicantsSerializer: data | — |
+| 976 | GET | `hackathon/list-form/<str:hackathon_id>/` | Admin | 2 → 2 | — | 1 | 0.4 KB | — | — |
+| 977 | GET | `hackathon/list-organisations/` | Admin | 1 → 1 | — | 145 | 21.2 KB | returns every row (no paging) | M-65 |
+| 978 | GET | `hackathon/list-districts/` | Admin | 1 → 1 | — | 161 | 20.7 KB | — | — |
+| 979 | GET | `hackathon/list-default-form-fields/` | Admin | 0 → 0 | — | — | 0.2 KB | — | — |
+| 980 | GET | `notification/` | Student | 2 → 2 | — | 20 | 12.9 KB | — | L-57 |
+| 981 | GET | `notification/unread-count/` | Student | 1 → 1 | — | — | 0.1 KB | — | H-40, L-57 |
+| 982 | PATCH | `notification/read-all/` | — | write (not load-tested) | — | — | — | — | — |
+| 983 | PATCH | `notification/read/` | — | write (not load-tested) | — | — | — | — | — |
+| 984 | PATCH | `notification/<str:notification_id>/read/` | — | write (not load-tested) | — | — | — | — | — |
+| 985 | PATCH | `notification/<str:notification_id>/archive/` | — | write (not load-tested) | — | — | — | — | — |
+| 986 | DELETE | `notification/<str:notification_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 987 | DELETE | `notification/delete/all/` | — | write (not load-tested) | — | — | — | — | — |
+| 988 | DELETE | `notification/broadcast/delete/id/<str:broadcast_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 989 | DELETE | `notification/broadcast/delete/all/` | — | write (not load-tested) | — | — | — | — | — |
+| 990 | GET | `notification/broadcast/list/all/` | Admin | 1 → 1 | — | 28 | 17.2 KB | returns every row (no paging); per-row method fields: BroadcastNotificationAdminSerializer: target_details | M-65 |
+| 991 | POST | `notification/broadcast/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 992 | PATCH | `notification/broadcast/update/id/<str:broadcast_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 993 | GET | `public/campus-details/<str:college_code>/` | Admin | 17 → 19 | 3× `user_ig_link` | 20 | 4.9 KB | response cached; no index: wallet(karma_last_updated_at); per-row method fields: CampusDetailsPublicSerializer: total_karma, rank, social_links, campus_lead | M-66, M-64 |
+| 994 | GET | `public/lc-list` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: LcListSerializer: karma | — |
+| 995 | GET | `public/<str:circle_id>/lc-details/` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: LcDetailsSerializer: total_karma, rank | — |
+| 996 | GET | `public/lc-dashboard/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 997 | GET | `public/lc-report/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 998 | GET | `public/college-wise-lc-report/` | Admin | 2 → 2 | — | 10 (paged) | 0.9 KB | — | — |
+| 999 | GET | `public/college-wise-lc-report/csv/` | Admin | 1 → 1 | — | — | 0.1 KB | — | — |
+| 1000 | GET | `public/lc-report/csv/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 1001 | GET | `public/lc-enrollment/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 1002 | GET | `public/lc-enrollment/csv/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 1003 | GET | `public/global-count/` | Admin | 5 → 5 | — | 2 | 0.3 KB | — | — |
+| 1004 | GET | `public/gta-sandshore/` | — | not measured (no successful response in test data; 500) | — | — | — | outbound HTTP in the request (api/common/common_views.py:674) | — |
+| 1005 | GET | `public/profile-pic/<str:muid>/` | Admin | 1 → 1 | — | — | 0.1 KB | — | — |
+| 1006 | GET | `public/list-ig/` | Admin | 1 → 1 | — | 7 | 0.3 KB | — | — |
+| 1007 | GET | `public/list-ig-top100/` | Admin | 0 → 0 | — | 0 | 0.1 KB | — | — |
+| 1008 | GET | `public/list/levels/` | Admin | 21 → 48 | 47× `task_list` | 47 | 13.1 KB | query inside a loop (api/common/common_views.py:805,805) | L-56 |
+| 1009 | GET | `public/leaderboard/top-100/` | Admin | 301 → 301 | 100× `wallet` | 100 | 15.8 KB | — | H-37 |
+| 1010 | GET | `public/list/college/` | Admin | 2 → 2 | — | 28 | 4.4 KB | returns every row (no paging) | M-65 |
+| 1011 | GET | `public/list/district/` | Admin | 1 → 1 | — | 0 | 0.1 KB | — | — |
+| 1012 | GET | `public/list/state/` | Admin | 1 → 1 | — | 0 | 0.1 KB | — | — |
+| 1013 | GET | `public/list/country/` | Admin | 1 → 1 | — | 245 | 31.4 KB | — | — |
+| 1014 | GET | `public/external/user/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 1015 | GET | `public/jobs/` | Admin | 9 → 9 | — | 25 (paged) | 13.8 KB | — | — |
+| 1016 | GET | `public/ig/list/` | Admin | 9 → 11 | — | 7 | 20.7 KB | response cached | M-60 |
+| 1017 | GET | `public/ig/<str:pk>/` | Admin | 13 → 25 | 10× `user` | 5 | 5.8 KB | — | M-60 |
+| 1018 | GET | `public/career-lab/ongoing/` | Admin | 1 → 51 | 50× `user` | 28 | 24.0 KB | returns every row (no paging) | M-65 |
+| 1019 | GET | `public/career-lab/previous/` | Admin | 1 → 1 | — | 0 (paged) | 0.2 KB | — | — |
+| 1020 | GET | `public/events/` | Admin | 2 → 2 | — | 1 (paged) | 0.9 KB | no index: events(deleted_at,end_datetime,status); per-row method fields: EventListItemSerializer: viewer_interest_status | M-64 |
+| 1021 | GET | `public/events/featured/` | Admin | 1 → 1 | — | 0 (paged) | 0.2 KB | no index: events(deleted_at,end_datetime,status); per-row method fields: EventListItemSerializer: viewer_interest_status | M-64 |
+| 1022 | GET | `public/events/<str:event_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 1023 | GET | `top100/leaderboard/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 1024 | POST | `launchpad/register-company/` | — | write (not load-tested) | — | — | — | sends e-mail in the request (api/launchpad/launchpad_views.py:155) | M-70 |
+| 1025 | POST | `launchpad/register-recruiter/` | — | write (not load-tested) | — | — | — | — | — |
+| 1026 | GET | `launchpad/company-list/` | Admin | 1 → 1 | — | 168 | 80.3 KB | returns every row (no paging) | M-65 |
+| 1027 | GET | `launchpad/company-list-verified/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 1028 | POST | `launchpad/login-company/` | — | write (not load-tested) | — | — | — | — | — |
+| 1029 | POST | `launchpad/login-recruiter/` | — | write (not load-tested) | — | — | — | — | — |
+| 1030 | POST | `launchpad/refresh-token/` | — | write (not load-tested) | — | — | — | — | — |
+| 1031 | POST | `launchpad/add-job/` | — | write (not load-tested) | — | — | — | — | — |
+| 1032 | GET | `launchpad/job/<str:job_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 1033 | PUT | `launchpad/job/<str:job_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 1034 | DELETE | `launchpad/job/<str:job_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 1035 | POST | `launchpad/company-info/` | — | write (not load-tested) | — | — | — | — | — |
+| 1036 | POST | `launchpad/recruiter-info/` | — | write (not load-tested) | — | — | — | — | — |
+| 1037 | POST | `launchpad/company-verify/` | — | write (not load-tested) | — | — | — | sends e-mail in the request (api/launchpad/launchpad_views.py:994) | M-70 |
+| 1038 | GET | `launchpad/list-jobs/` | Campus IG Lead | 2 → 2 | — | 56 | 70.6 KB | returns every row (no paging) | M-65 |
+| 1039 | POST | `launchpad/verify-task/` | — | write (not load-tested) | — | — | — | — | — |
+| 1040 | GET | `launchpad/list-launchpad-students/<str:job_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: EligibleStudentSerializer: candidate_links, karma_distribution | — |
+| 1041 | GET | `launchpad/hire-requests/` | — | not measured (no successful response in test data; 500) | — | — | — | query inside a loop (api/launchpad/launchpad_views.py:1312,1312,1312) | — |
+| 1042 | POST | `launchpad/send-job-invitations/` | — | write (not load-tested) | — | — | — | query inside a loop (api/launchpad/launchpad_views.py:1544,1544) | L-59 |
+| 1043 | GET | `launchpad/student/job-invitations/` | Comic Admin | 1 → 2 | — | 2 (paged) | 2.4 KB | — | — |
+| 1044 | POST | `launchpad/student/apply-to-job/` | — | write (not load-tested) | — | — | — | — | — |
+| 1045 | GET | `launchpad/accepted-students/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 1046 | GET | `launchpad/accepted-students/<str:job_id>/` | — | not measured (no successful response in test data; 500) | — | — | — | — | — |
+| 1047 | POST | `launchpad/schedule-interview/` | — | write (not load-tested) | — | — | — | — | — |
+| 1048 | POST | `launchpad/application-final-decision/` | — | write (not load-tested) | — | — | — | — | — |
+| 1049 | PATCH | `launchpad/delete-company/` | — | write (not load-tested) | — | — | — | — | — |
+| 1050 | GET | `launchpad/leaderboard/` | Admin | 1 → 1 | — | 0 (paged) | 0.2 KB | — | — |
+| 1051 | GET | `launchpad/task-completed-leaderboard/` | Admin | 2 → 2 | — | 0 (paged) | 0.2 KB | no index: task_list(event) | M-64 |
+| 1052 | GET | `launchpad/list-participants/` | Admin | 1 → 1 | — | 0 (paged) | 0.2 KB | — | — |
+| 1053 | GET | `launchpad/launchpad-details/` | Admin | 5 → 5 | 4× `user_organization_link` | — | 0.1 KB | no index: task_list(event,hashtag) | M-64 |
+| 1054 | GET | `launchpad/college-data/` | Admin | 1 → 1 | — | 0 (paged) | 0.2 KB | — | — |
+| 1055 | GET | `launchpad/user-college-link/` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: LaunchpadUserListSerializer: colleges | — |
+| 1056 | POST | `launchpad/user-college-link/` | — | write (not load-tested) | — | — | — | query inside a loop (api/launchpad/launchpad_views.py:2593,2593,2596); insert/update inside a loop (api/launchpad/launchpad_views.py:2599,2601) | L-59 |
+| 1057 | PUT | `launchpad/user-college-link/` | — | write (not load-tested) | — | — | — | — | — |
+| 1058 | GET | `launchpad/user-college-link/<str:email>` | — | not measured (no successful response in test data; 500) | — | — | — | per-row method fields: LaunchpadUserListSerializer: colleges | — |
+| 1059 | POST | `launchpad/user-college-link/<str:email>` | — | write (not load-tested) | — | — | — | query inside a loop (api/launchpad/launchpad_views.py:2593,2593,2596); insert/update inside a loop (api/launchpad/launchpad_views.py:2599,2601) | L-59 |
+| 1060 | PUT | `launchpad/user-college-link/<str:email>` | — | write (not load-tested) | — | — | — | — | — |
+| 1061 | GET | `launchpad/user-college-link-public/<str:email>` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: LaunchpadUserListSerializer: colleges | — |
+| 1062 | GET | `launchpad/user-profile/` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: LaunchpadUserListSerializer: colleges | — |
+| 1063 | PUT | `launchpad/user-profile/` | — | write (not load-tested) | — | — | — | — | — |
+| 1064 | GET | `launchpad/user-college-data/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 1065 | POST | `launchpad/bulk-user-college-link/` | — | write (not load-tested) | — | — | — | query inside a loop (api/launchpad/launchpad_views.py:2845,2845,2851); insert/update inside a loop (api/launchpad/launchpad_views.py:2854,2856) | L-59 |
+| 1066 | GET | `launchpad/list-participants-admin/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 1067 | GET | `launchpad/user-details/<str:launchpad_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: UserProfileSerializer: percentile, rank, interest_groups | — |
+| 1068 | GET | `launchpad/socials/<str:launchpad_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 1069 | GET | `launchpad/user-log/<str:launchpad_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 1070 | GET | `launchpad/get-user-levels/<str:launchpad_id>/` | — | not measured (no successful response in test data; 400) | — | — | — | per-row method fields: UserLevelSerializer: tasks | — |
+| 1071 | GET | `launchpad/ig-leaderboard/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 1072 | POST | `launchpad/forgot-password/` | — | write (not load-tested) | — | — | — | sends e-mail in the request (api/launchpad/launchpad_views.py:3203) | M-70 |
+| 1073 | POST | `launchpad/reset-password/` | — | write (not load-tested) | — | — | — | — | — |
+| 1074 | POST | `launchpad/verify-reset-token/` | — | write (not load-tested) | — | — | — | — | — |
+| 1075 | POST | `launchpad/change-password/` | — | write (not load-tested) | — | — | — | — | — |
+| 1076 | POST | `donate/order/` | — | write (not load-tested) | — | — | — | — | — |
+| 1077 | POST | `donate/verify/` | — | write (not load-tested) | — | — | — | sends e-mail in the request (api/donate/views.py:573) | M-70 |
+| 1078 | POST | `donate/subscription/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 1079 | POST | `donate/subscription/verify/` | — | write (not load-tested) | — | — | — | sends e-mail in the request (api/donate/views.py:813) | M-70 |
+| 1080 | POST | `donate/bank-transfer/` | — | write (not load-tested) | — | — | — | — | — |
+| 1081 | GET | `calendar/ig-mentor/<str:ig_id>/sessions/` | Admin | 2 → 2 | — | 0 | 0.1 KB | — | — |
+| 1082 | GET | `calendar/campus-mentor/<str:campus_id>/sessions/` | Admin | 2 → 2 | — | 0 | 0.1 KB | — | — |
+| 1083 | GET | `calendar/company/<str:company_org_id>/sessions/` | Admin | 2 → 2 | — | 0 | 0.1 KB | — | — |
+| 1084 | GET | `calendar/events/` | Admin | 1 → 1 | — | 1 | 0.4 KB | no index: events(deleted_at,status) | M-64 |
+| 1085 | GET | `calendar/ig/<str:ig_id>/events/` | Admin | 2 → 2 | — | 0 | 0.1 KB | no index: events(deleted_at,organiser_ig_id,scope_ig_id,status) | M-64 |
+| 1086 | GET | `calendar/campus/<str:campus_id>/events/` | Admin | 2 → 2 | — | 0 | 0.1 KB | no index: events(deleted_at,organiser_org_id,scope_org_id,status) | M-64 |
+| 1087 | GET | `calendar/company/<str:company_id>/events/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 1088 | GET | `muComics/comics/genres/` | Admin | 2 → 2 | — | 10 (paged) | 3.3 KB | — | — |
+| 1089 | POST | `muComics/comics/genres/` | — | write (not load-tested) | — | — | — | — | — |
+| 1090 | GET | `muComics/comics/genres/<str:genre_id>/` | Admin | 1 → 1 | — | — | 0.5 KB | — | — |
+| 1091 | PATCH | `muComics/comics/genres/<str:genre_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 1092 | DELETE | `muComics/comics/genres/<str:genre_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 1093 | POST | `muComics/comics/genres/<str:genre_id>/reinstate/` | — | write (not load-tested) | — | — | — | — | — |
+| 1094 | GET | `muComics/comics/` | Admin | 16 → 15 | 10× `comic_contributor_link` | 10 (paged) | 8.5 KB | — | M-61 |
+| 1095 | POST | `muComics/comics/` | — | write (not load-tested) | — | — | — | — | — |
+| 1096 | GET | `muComics/comics/<str:comic_id>/` | Admin | 5 → 5 | — | 1 | 1.6 KB | — | — |
+| 1097 | PATCH | `muComics/comics/<str:comic_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 1098 | DELETE | `muComics/comics/<str:comic_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 1099 | POST | `muComics/comics/<str:comic_id>/publish/` | — | write (not load-tested) | — | — | — | — | — |
+| 1100 | POST | `muComics/comics/<str:comic_id>/archive/` | — | write (not load-tested) | — | — | — | — | — |
+| 1101 | POST | `muComics/comics/<str:comic_id>/unarchive/` | — | write (not load-tested) | — | — | — | — | — |
+| 1102 | GET | `muComics/comics/<str:comic_id>/contributors/` | Admin | 2 → 2 | — | 0 (paged) | 0.2 KB | — | — |
+| 1103 | POST | `muComics/comics/<str:comic_id>/contributors/` | — | write (not load-tested) | — | — | — | — | — |
+| 1104 | PATCH | `muComics/comics/<str:comic_id>/contributors/<str:contributor_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 1105 | DELETE | `muComics/comics/<str:comic_id>/contributors/<str:contributor_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 1106 | POST | `muComics/comics/<str:comic_id>/genres/` | — | write (not load-tested) | — | — | — | — | — |
+| 1107 | DELETE | `muComics/comics/<str:comic_id>/genres/<str:link_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 1108 | GET | `muComics/comments/comic/<str:comic_id>/list/` | Admin | 4 → 2 | — | 0 (paged) | 0.2 KB | — | — |
+| 1109 | POST | `muComics/comments/comic/<str:comic_id>/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 1110 | GET | `muComics/comments/chapter/<str:chapter_id>/list/` | — | not measured (no successful response in test data; 404) | — | — | — | — | — |
+| 1111 | POST | `muComics/comments/chapter/<str:chapter_id>/create/` | — | write (not load-tested) | — | — | — | — | — |
+| 1112 | GET | `muComics/comments/admin/` | Comic Admin | 3 → 3 | — | 10 (paged) | 9.6 KB | — | — |
+| 1113 | DELETE | `muComics/comments/admin/<str:comment_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 1114 | PATCH | `muComics/comments/<str:comment_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 1115 | DELETE | `muComics/comments/<str:comment_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 1116 | POST | `muComics/chapters/upload-url/` | — | write (not load-tested) | — | — | — | — | — |
+| 1117 | GET | `muComics/chapters/` | — | not measured (no successful response in test data; 400) | — | — | — | — | — |
+| 1118 | POST | `muComics/chapters/` | — | write (not load-tested) | — | — | — | — | — |
+| 1119 | GET | `muComics/chapters/<str:chapter_id>/` | — | not measured (no successful response in test data; 404) | — | — | — | — | — |
+| 1120 | PATCH | `muComics/chapters/<str:chapter_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 1121 | DELETE | `muComics/chapters/<str:chapter_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 1122 | POST | `muComics/chapters/<str:chapter_id>/publish/` | — | write (not load-tested) | — | — | — | — | — |
+| 1123 | POST | `muComics/chapters/<str:chapter_id>/archive/` | — | write (not load-tested) | — | — | — | — | — |
+| 1124 | GET | `muComics/chapters/<str:chapter_id>/pages/` | — | not measured (no successful response in test data; 404) | — | — | — | — | — |
+| 1125 | POST | `muComics/chapters/<str:chapter_id>/pages/` | — | write (not load-tested) | — | — | — | — | — |
+| 1126 | POST | `muComics/chapters/<str:chapter_id>/pages/reorder/` | — | write (not load-tested) | — | — | — | — | — |
+| 1127 | POST | `muComics/chapters/<str:chapter_id>/pages/register/` | — | write (not load-tested) | — | — | — | insert/update inside a loop (api/muComics/chapter/chapter_views.py:779) | L-59 |
+| 1128 | PATCH | `muComics/chapters/pages/<str:page_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 1129 | DELETE | `muComics/chapters/pages/<str:page_id>/` | — | write (not load-tested) | — | — | — | — | — |
+| 1130 | GET | `muComics/reader/me/` | Campus IG Lead | 4 → 4 | — | — | 0.2 KB | — | — |
+| 1131 | GET | `muComics/reader/me/bookmarks/` | Campus Lead | 1 → 2 | — | 2 (paged) | 1.0 KB | — | — |
+| 1132 | GET | `muComics/reader/me/progress/` | Admin | 1 → 2 | — | 1 (paged) | 0.6 KB | — | — |
+| 1133 | POST | `muComics/reader/comics/<str:comic_id>/likes/` | — | write (not load-tested) | — | — | — | — | — |
+| 1134 | DELETE | `muComics/reader/comics/<str:comic_id>/likes/` | — | write (not load-tested) | — | — | — | — | — |
+| 1135 | POST | `muComics/reader/comics/<str:comic_id>/bookmarks/` | — | write (not load-tested) | — | — | — | — | — |
+| 1136 | DELETE | `muComics/reader/comics/<str:comic_id>/bookmarks/` | — | write (not load-tested) | — | — | — | — | — |
+| 1137 | GET | `muComics/reader/comics/<str:comic_id>/interaction-status/` | Admin | 2 → 2 | — | — | 0.1 KB | — | — |
+| 1138 | GET | `muComics/reader/comics/<str:comic_id>/progress/` | Admin | 1 → 1 | — | — | 0.1 KB | — | — |
+| 1139 | PUT | `muComics/reader/comics/<str:comic_id>/progress/` | — | write (not load-tested) | — | — | — | — | — |
+| 1140 | GET | `api/schema/` | — | not measured (no successful response in test data; 403) | — | — | — | — | — |
+
+## Appendix J — Performance of every dashboard page (129 rows)
+
+Each page was opened once with a cold cache, as the role in "Tested as", on the production build, with mobile throttling (4× slower CPU, 150 ms round trip, 1.6 Mbps down).
+- **JS downloaded:** script files / compressed KB. **JS unused on load:** the share of the downloaded JavaScript that did not run before the page settled (V8 coverage), with its unzipped size.
+- **API calls on load:** calls to the backend until the page settled (compressed KB). **Sequential API rounds:** the longest chain of calls where each one started after the one before it had finished. **Data ready at:** when the last of those calls finished, counted from the start of navigation.
+- **FCP / LCP:** first and largest contentful paint. **TBT:** Total Blocking Time — the sum of main-thread long-task time over 50 ms after FCP. **CLS:** layout shift. **Prefetches:** Next.js RSC requests for other pages made during load.
+- "Other notes" lists redirects, the wait for `user/info` (H-40), duplicate or failed calls, calls repeated after load (polling), large images, and the result of typing 6 letters into the page's search box.
+
+| # | Page | Tested as | JS downloaded (files / KB) | JS unused on load | API calls on load (KB) | Sequential API rounds | Data ready at | FCP / LCP | Blocking time (TBT) | CLS | DOM nodes / JS heap | Prefetches (RSC) | Other notes | Issues |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | `/` | Admin | 45 / 832 | 69% (2907 KB unzipped) | 9 (45) | 2 | 8.8 s | 1.8 s / 8.8 s | 2245 ms | 0.006 | 851 / 36.7 MB | 46 | redirected to `/dashboard`; page requests start only after `user/info` returns; images 293 KB | H-40, H-36, M-64, H-37, M-60, M-67 |
+| 2 | `/callback` | Student | 51 / 882 | 87% (3012 KB unzipped) | 0 (0) | 0 | — | 1.5 s / 4.3 s | 441 ms | 0.002 | 119 / 13.8 MB | 1 | — | — |
+| 3 | `/dashboard` | Student | 45 / 832 | 69% (2907 KB unzipped) | 9 (47) | 2 | 8.7 s | 1.6 s / 8.4 s | 2067 ms | 0.007 | 799 / 37.0 MB | 46 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64, H-37, M-60, M-67 |
+| 4 | `/dashboard/campus/[id]` | Campus Lead | 39 / 702 | 65% (2383 KB unzipped) | 6 (6) | 2 | 7.3 s | 1.6 s / 7.4 s | 1657 ms | 0.015 | 775 / 37.8 MB | 13 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64, M-66 |
+| 5 | `/dashboard/campus/manage` | Campus Lead | 42 / 751 | 60% (2561 KB unzipped) | 15 (19) | 3 | 9.0 s | 1.6 s / 8.1 s | 2933 ms | 0.007 | 1293 / 49.6 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 6 API call(s), 6 server round trip(s) | H-39, H-40, H-36, M-64, M-66, M-69 |
+| 6 | `/dashboard/changelog` | Student | 38 / 694 | 64% (2404 KB unzipped) | 4 (4) | 2 | 7.4 s | 1.6 s / 7.3 s | 1904 ms | 0.001 | 744 / 37.5 MB | 15 | images 293 KB | H-39, H-40, H-36, M-64 |
+| 7 | `/dashboard/company` | Company | 39 / 696 | 65% (2386 KB unzipped) | 6 (5) | 3 | 8.0 s | 1.6 s / 7.9 s | 2249 ms | 0.001 | 648 / 32.2 MB | 36 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64, M-67 |
+| 8 | `/dashboard/company/admin` | Company | 40 / 701 | 65% (2381 KB unzipped) | 8 (11) | 3 | 7.9 s | 1.6 s / 7.7 s | 2001 ms | 0.114 | 904 / 40.6 MB | 11 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64 |
+| 9 | `/dashboard/company/analytics` | Company | 41 / 708 | 65% (2416 KB unzipped) | 7 (13) | 3 | 7.9 s | 1.6 s / 7.8 s | 2030 ms | 0.001 | 605 / 41.1 MB | 11 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64, M-63 |
+| 10 | `/dashboard/company/collaborations` | Company | 40 / 703 | 65% (2387 KB unzipped) | 8 (17) | 3 | 8.0 s | 1.6 s / 7.8 s | 2320 ms | 0.001 | 526 / 32.9 MB | 11 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64, M-61 |
+| 11 | `/dashboard/company/event-templates` | Company | 40 / 701 | 65% (2379 KB unzipped) | 6 (5) | 3 | 7.9 s | 1.6 s / 7.9 s | 2117 ms | 0.001 | 526 / 43.4 MB | 13 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64 |
+| 12 | `/dashboard/company/feedback` | Company | 40 / 703 | 64% (2388 KB unzipped) | 8 (9) | 3 | 7.8 s | 1.6 s / 7.5 s | 2031 ms | 0.012 | 526 / 31.8 MB | 11 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64 |
+| 13 | `/dashboard/company/ig-requests` | Company | 40 / 703 | 64% (2386 KB unzipped) | 7 (7) | 3 | 8.1 s | 1.6 s / 7.9 s | 2225 ms | 0.001 | 643 / 32.4 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-60 |
+| 14 | `/dashboard/company/ig-sponsorship` | Company | 40 / 700 | 65% (2375 KB unzipped) | 8 (42) | 4 | 8.2 s | 1.6 s / 7.5 s | 2198 ms | 0.001 | 545 / 41.7 MB | 11 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64, M-60 |
+| 15 | `/dashboard/company/jobs` | Company | 42 / 740 | 66% (2549 KB unzipped) | 7 (12) | 3 | 8.1 s | 1.6 s / 7.9 s | 2172 ms | 0.001 | 870 / 33.9 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-61 |
+| 16 | `/dashboard/company/jobs/[jobId]` | Company | 42 / 740 | 66% (2549 KB unzipped) | 15 (39) | 4 | 8.8 s | 1.6 s / 7.9 s | 2444 ms | 0.001 | 1203 / 43.3 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 6 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-61, M-69 |
+| 17 | `/dashboard/company/jobs/[jobId]/edit` | Company | 42 / 741 | 66% (2551 KB unzipped) | 7 (13) | 3 | 8.0 s | 1.6 s / 7.8 s | 2195 ms | 0.001 | 606 / 32.4 MB | 11 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64 |
+| 18 | `/dashboard/company/jobs/create` | Company | 42 / 741 | 66% (2549 KB unzipped) | 6 (5) | 3 | 8.0 s | 1.6 s / 7.8 s | 2195 ms | 0.001 | 604 / 38.4 MB | 11 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64 |
+| 19 | `/dashboard/company/mentors` | Company | 40 / 702 | 65% (2382 KB unzipped) | 7 (5) | 3 | 8.0 s | 1.6 s / 7.8 s | 2183 ms | 0.001 | 525 / 40.0 MB | 11 | page requests start only after `user/info` returns; images 305 KB | H-39, H-40, H-36, M-64 |
+| 20 | `/dashboard/company/profile/edit` | Company | 40 / 704 | 65% (2392 KB unzipped) | 6 (5) | 3 | 7.7 s | 1.6 s / 7.6 s | 1924 ms | 0.001 | 601 / 39.9 MB | 14 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64 |
+| 21 | `/dashboard/company/tasks` | Company | 44 / 766 | 67% (2641 KB unzipped) | 15 (47) | 4 | 8.6 s | 1.6 s / 8.0 s | 2168 ms | 0.001 | 744 / 34.2 MB | 14 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64, M-61, L-58, M-65 |
+| 22 | `/dashboard/connect-discord` | Student | 39 / 698 | 66% (2375 KB unzipped) | 4 (4) | 2 | 7.4 s | 1.6 s / 7.7 s | 1978 ms | 0.001 | 493 / 36.8 MB | 13 | images 293 KB | H-39, H-40, H-36, M-64 |
+| 23 | `/dashboard/courses` | Admin | 39 / 700 | 66% (2379 KB unzipped) | 5 (3) | 2 | 7.4 s | 1.6 s / 7.6 s | 1806 ms | 0.002 | 512 / 38.1 MB | 13 | page requests start only after `user/info` returns; images 293 KB; third-party: opensheet.elk.sh | H-39, H-40, L-66, H-36, M-64 |
+| 24 | `/dashboard/district` | District Lead | 41 / 725 | 65% (2462 KB unzipped) | 9 (5) | 2 | 7.9 s | 1.6 s / 7.9 s | 2113 ms | 0.12 | 648 / 31.9 MB | 13 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 25 | `/dashboard/edit-ig` | Admin | 42 / 761 | 69% (2642 KB unzipped) | 5 (39) | 2 | 8.1 s | 1.6 s / 7.8 s | 2147 ms | 0.001 | 611 / 37.2 MB | 27 | page requests start only after `user/info` returns; images 437 KB; typing 6 letters in search: 0 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-60, M-67 |
+| 26 | `/dashboard/edit-ig/[id]` | IG Lead | 42 / 761 | 67% (2643 KB unzipped) | 8 (41) | 3 | 8.4 s | 1.6 s / 7.9 s | 2203 ms | 0.001 | 535 / 43.1 MB | 15 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64, M-60, M-61 |
+| 27 | `/dashboard/events` | Student | 41 / 744 | 66% (2547 KB unzipped) | 7 (7) | 2 | 7.9 s | 1.6 s / 7.2 s | 1572 ms | 0.014 | 502 / 41.2 MB | 13 | page requests start only after `user/info` returns; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 28 | `/dashboard/events/[id]` | Student | 41 / 742 | 67% (2544 KB unzipped) | 5 (9) | 2 | 7.6 s | 1.6 s / 7.1 s | 1326 ms | 0.001 | 597 / 38.2 MB | 13 | page requests start only after `user/info` returns | H-39, H-40, H-36, M-64, M-61 |
+| 29 | `/dashboard/interest-groups` | Student | 38 / 694 | 65% (2362 KB unzipped) | 5 (41) | 2 | 7.7 s | 1.7 s / 7.0 s | 1449 ms | 0.001 | 562 / 35.7 MB | 13 | page requests start only after `user/info` returns; typing 6 letters in search: 0 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-60 |
+| 30 | `/dashboard/interest-groups/[id]` | Student | 38 / 694 | 65% (2362 KB unzipped) | 5 (10) | 2 | 7.6 s | 1.6 s / 7.1 s | 1596 ms | 0 | 534 / 31.1 MB | 17 | page requests start only after `user/info` returns | H-39, H-40, H-36, M-64, M-60 |
+| 31 | `/dashboard/intern` | Intern | 40 / 717 | 65% (2462 KB unzipped) | 10 (6) | 2 | 7.8 s | 1.6 s / 7.7 s | 2003 ms | 0.058 | 653 / 38.9 MB | 29 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64, M-67 |
+| 32 | `/dashboard/intern/leaderboard` | Intern | 40 / 715 | 65% (2452 KB unzipped) | 7 (11) | 2 | 7.6 s | 1.6 s / 7.6 s | 2040 ms | 0.001 | 722 / 38.8 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 33 | `/dashboard/intern/leave` | Intern | 40 / 717 | 65% (2459 KB unzipped) | 6 (3) | 2 | 7.5 s | 1.6 s / 7.6 s | 1964 ms | 0.001 | 555 / 38.3 MB | 11 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64 |
+| 34 | `/dashboard/intern/minutes` | Intern | 40 / 718 | 66% (2461 KB unzipped) | 5 (3) | 2 | 7.7 s | 1.6 s / 7.8 s | 2019 ms | 0.001 | 475 / 38.9 MB | 13 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 0 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 35 | `/dashboard/intern/quest-log` | Intern | 40 / 712 | 66% (2441 KB unzipped) | 7 (4) | 2 | 7.6 s | 1.6 s / 7.6 s | 2002 ms | 0.001 | 482 / 38.5 MB | 13 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 0 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 36 | `/dashboard/intern/tasks` | Intern | 40 / 715 | 66% (2455 KB unzipped) | 5 (3) | 2 | 7.7 s | 1.6 s / 7.8 s | 2021 ms | 0.001 | 467 / 38.6 MB | 13 | page requests start only after `user/info` returns; images 315 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 37 | `/dashboard/intern/timesheet` | Intern | 40 / 716 | 65% (2457 KB unzipped) | 9 (5) | 2 | 7.7 s | 1.6 s / 7.7 s | 2115 ms | 0.001 | 600 / 40.5 MB | 11 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64 |
+| 38 | `/dashboard/intern/weekly-review` | Intern | 40 / 713 | 65% (2443 KB unzipped) | 6 (3) | 2 | 7.5 s | 1.6 s / 7.6 s | 2033 ms | 0.001 | 550 / 39.2 MB | 11 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64 |
+| 39 | `/dashboard/jobs` | Student | 41 / 740 | 67% (2550 KB unzipped) | 7 (49) | 2 | 8.2 s | 1.6 s / 8.0 s | 2108 ms | 0.002 | 479 / 35.1 MB | 11 | page requests start only after `user/info` returns; images 449 KB; typing 6 letters in search: 2 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-61 |
+| 40 | `/dashboard/leaderboard` | Student | 39 / 700 | 65% (2380 KB unzipped) | 5 (5) | 2 | 7.4 s | 1.6 s / 7.5 s | 1820 ms | 0.001 | 484 / 37.1 MB | 11 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64, H-37 |
+| 41 | `/dashboard/learning-circle` | Student | 41 / 743 | 65% (2553 KB unzipped) | 8 (46) | 2 | 8.0 s | 1.6 s / 7.7 s | 1991 ms | 0.002 | 912 / 34.6 MB | 37 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-60, M-67 |
+| 42 | `/dashboard/learning-circle/[id]` | Student | 41 / 743 | 67% (2550 KB unzipped) | 12 (10) | 4 | 11.1 s | 1.6 s / 7.8 s | 1924 ms | 0.001 | 442 / 42.8 MB | 13 | page requests start only after `user/info` returns; duplicate calls: api/v1/dashboard/learningcircle/info/ef9baa6d-7f6a-481b-8d63-231a7cc6cf80/ ×3; api/v1/dashboard/learningcircle/meeting/list/ef9baa6d-7f6a-481b-8d63-231a7cc6cf80/ ×3; 6 call(s) failed with 5xx; 2 call(s) repeated after load: api/v1/dashboard/learningcircle/info/ef9baa6d-7f6a-481b-8d63-231a7cc6cf80/, api/v1/dashboard/learningcircle/meeting/list/ef9baa6d-7f6a-481b-8d63-231a7cc6cf80/; images 293 KB | H-39, H-40, H-36, M-64, M-68 |
+| 43 | `/dashboard/learning-circle/[id]/meeting/[meet_id]` | Student | 41 / 743 | 66% (2551 KB unzipped) | 12 (10) | 6 | 11.2 s | 1.6 s / 7.6 s | 1780 ms | 0.001 | 550 / 40.3 MB | 15 | page requests start only after `user/info` returns; duplicate calls: api/v1/dashboard/learningcircle/info/ef9baa6d-7f6a-481b-8d63-231a7cc6cf80/ ×3; api/v1/dashboard/learningcircle/meeting/list/ef9baa6d-7f6a-481b-8d63-231a7cc6cf80/ ×3; 6 call(s) failed with 5xx; 2 call(s) repeated after load: api/v1/dashboard/learningcircle/info/ef9baa6d-7f6a-481b-8d63-231a7cc6cf80/, api/v1/dashboard/learningcircle/meeting/list/ef9baa6d-7f6a-481b-8d63-231a7cc6cf80/; images 293 KB | H-39, H-40, H-36, M-64, M-68 |
+| 44 | `/dashboard/learning-circle/invite/[link_id]` | Student | 41 / 743 | 67% (2550 KB unzipped) | 7 (6) | 4 | 10.9 s | 1.6 s / 7.6 s | 1800 ms | 0.001 | 447 / 38.6 MB | 13 | page requests start only after `user/info` returns; duplicate calls: api/v1/dashboard/learningcircle/invite/status/03d235b0-914e-44c2-aab2-cec0e1ae9212/ ×3; 3 call(s) failed with 5xx; 1 call(s) repeated after load: api/v1/dashboard/learningcircle/invite/status/03d235b0-914e-44c2-aab2-cec0e1ae9212/; images 293 KB | H-39, H-40, H-36, M-64, M-68 |
+| 45 | `/dashboard/learning-circle/invites` | Student | 41 / 743 | 67% (2549 KB unzipped) | 6 (5) | 2 | 7.7 s | 1.6 s / 7.8 s | 1850 ms | 0.051 | 450 / 40.4 MB | 15 | page requests start only after `user/info` returns; images 315 KB | H-39, H-40, H-36, M-64 |
+| 46 | `/dashboard/manage-events` | Campus Lead | 42 / 744 | 66% (2547 KB unzipped) | 19 (24) | 3 | 8.4 s | 1.6 s / 8.0 s | 2157 ms | 0.007 | 533 / 35.9 MB | 11 | page requests start only after `user/info` returns; duplicate calls: api/v1/dashboard/events/meta/event-type-scope/ ×2; images 298 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, L-65, H-36, M-64, M-61 |
+| 47 | `/dashboard/manage-events/[id]` | Campus Lead | 42 / 744 | 67% (2548 KB unzipped) | 6 (4) | 2 | 7.7 s | 1.6 s / 7.8 s | 1937 ms | 0.001 | 460 / 40.8 MB | 11 | page requests start only after `user/info` returns; duplicate calls: api/v1/dashboard/user/info/ ×2; images 293 KB | H-39, H-40, L-65, H-36, M-64, M-61 |
+| 48 | `/dashboard/management` | Admin | 39 / 696 | 65% (2384 KB unzipped) | 4 (2) | 2 | 7.4 s | 1.6 s / 7.4 s | 1911 ms | 0.001 | 649 / 37.9 MB | 34 | images 293 KB | H-39, H-40, H-36, M-64, M-67 |
+| 49 | `/dashboard/management/channels` | Admin | 40 / 701 | 65% (2378 KB unzipped) | 5 (6) | 2 | 7.4 s | 1.6 s / 7.4 s | 1994 ms | 0.001 | 697 / 39.0 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-61 |
+| 50 | `/dashboard/management/college-levels` | Admin | 40 / 698 | 65% (2369 KB unzipped) | 5 (10) | 2 | 7.5 s | 1.6 s / 7.5 s | 1917 ms | 0.001 | 825 / 38.9 MB | 13 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-61, M-66 |
+| 51 | `/dashboard/management/community` | Admin | 39 / 696 | 65% (2376 KB unzipped) | 4 (2) | 2 | 7.3 s | 1.6 s / 7.5 s | 1824 ms | 0.001 | 567 / 37.6 MB | 28 | images 293 KB | H-39, H-40, H-36, M-64, M-67 |
+| 52 | `/dashboard/management/discord-moderation` | Discord Mod | 41 / 709 | 65% (2400 KB unzipped) | 7 (4) | 4 | 11.0 s | 1.6 s / 7.7 s | 2012 ms | 0.001 | 474 / 37.5 MB | 13 | page requests start only after `user/info` returns; duplicate calls: api/v1/dashboard/discord-moderator/leaderboard/?option=peer&perPage=10&pageIndex=1 ×3; 3 call(s) failed with 5xx; 1 call(s) repeated after load: api/v1/dashboard/discord-moderator/leaderboard/?option=peer&perPage=10&pageIndex=1; images 293 KB | H-39, H-40, H-36, M-64, M-68 |
+| 53 | `/dashboard/management/dynamic-type` | Admin | 40 / 702 | 65% (2386 KB unzipped) | 7 (4) | 4 | 11.1 s | 1.6 s / 7.8 s | 2116 ms | 0.001 | 554 / 39.2 MB | 13 | page requests start only after `user/info` returns; duplicate calls: api/v1/dashboard/dynamic-management/dynamic-role/ ×3; 3 call(s) failed with 5xx; 1 call(s) repeated after load: api/v1/dashboard/dynamic-management/dynamic-role/; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-68 |
+| 54 | `/dashboard/management/error-log` | Tech Team | 41 / 704 | 65% (2381 KB unzipped) | 5 (3) | 2 | 7.5 s | 1.6 s / 7.5 s | 1932 ms | 0.001 | 567 / 37.6 MB | 13 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 0 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 55 | `/dashboard/management/homepage` | Associate | 39 / 696 | 66% (2367 KB unzipped) | 4 (2) | 2 | 7.4 s | 1.6 s / 7.5 s | 1897 ms | 0.001 | 482 / 37.0 MB | 20 | images 293 KB | H-39, H-40, H-36, M-64, M-67 |
+| 56 | `/dashboard/management/homepage/career-labs` | Admin | 40 / 703 | 64% (2389 KB unzipped) | 5 (20) | 2 | 7.9 s | 1.6 s / 7.8 s | 2337 ms | 0.001 | 1201 / 42.6 MB | 14 | page requests start only after `user/info` returns; images 437 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-61 |
+| 57 | `/dashboard/management/karma-voucher` | Admin | 40 / 706 | 64% (2395 KB unzipped) | 5 (17) | 2 | 7.9 s | 1.6 s / 7.8 s | 2257 ms | 0.001 | 1058 / 41.9 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 58 | `/dashboard/management/manage-achievements` | Admin | 39 / 696 | 66% (2365 KB unzipped) | 4 (2) | 2 | 7.6 s | 1.6 s / 7.6 s | 2067 ms | 0.001 | 577 / 37.9 MB | 28 | images 293 KB | H-39, H-40, H-36, M-64, M-67 |
+| 59 | `/dashboard/management/manage-achievements/bulk-issue` | Admin | 39 / 696 | 65% (2365 KB unzipped) | 5 (110) | 2 | 8.1 s | 1.6 s / 7.5 s | 1917 ms | 0.001 | 539 / 38.2 MB | 13 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 0 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-65 |
+| 60 | `/dashboard/management/manage-achievements/issue` | Admin | 39 / 696 | 65% (2365 KB unzipped) | 4 (2) | 2 | 7.5 s | 1.6 s / 7.6 s | 1960 ms | 0.001 | 507 / 30.8 MB | 11 | images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 61 | `/dashboard/management/manage-achievements/list` | Admin | 39 / 696 | 65% (2365 KB unzipped) | 6 (116) | 2 | 8.6 s | 1.6 s / 7.7 s | 3072 ms | 0.001 | 5442 / 52.3 MB | 11 | page requests start only after `user/info` returns; images 437 KB; typing 6 letters in search: 0 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-65 |
+| 62 | `/dashboard/management/manage-achievements/logs` | Admin | 40 / 699 | 65% (2378 KB unzipped) | 5 (110) | 2 | 8.3 s | 1.6 s / 7.8 s | 2526 ms | 0.001 | 3813 / 31.8 MB | 13 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 0 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-65 |
+| 63 | `/dashboard/management/manage-achievements/rules` | Admin | 39 / 696 | 65% (2365 KB unzipped) | 7 (156) | 2 | 9.0 s | 1.6 s / 7.6 s | 2274 ms | 0.001 | 1430 / 33.6 MB | 11 | page requests start only after `user/info` returns; images 437 KB; typing 6 letters in search: 0 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-65, M-60 |
+| 64 | `/dashboard/management/manage-achievements/simulate` | Admin | 39 / 696 | 66% (2365 KB unzipped) | 4 (2) | 2 | 7.5 s | 1.6 s / 7.6 s | 1981 ms | 0.001 | 509 / 37.0 MB | 11 | images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 65 | `/dashboard/management/manage-companies` | Admin | 47 / 788 | 67% (2676 KB unzipped) | 5 (16) | 3 | 9.2 s | 1.6 s / 7.7 s | 2355 ms | 0.001 | 1198 / 39.1 MB | 16 | redirected to `/dashboard/management/role-verification?`; page requests start only after `user/info` returns; images 437 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-61 |
+| 66 | `/dashboard/management/manage-interest-groups` | Admin | 43 / 763 | 65% (2646 KB unzipped) | 6 (29) | 2 | 8.3 s | 1.6 s / 8.2 s | 2356 ms | 0.001 | 1006 / 39.0 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-60, M-61 |
+| 67 | `/dashboard/management/manage-interns` | Intern Lead | 45 / 753 | 66% (2601 KB unzipped) | 8 (24) | 2 | 8.2 s | 1.6 s / 7.9 s | 2241 ms | 0.007 | 942 / 33.5 MB | 26 | page requests start only after `user/info` returns; images 437 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, L-58, M-67 |
+| 68 | `/dashboard/management/manage-interns/intern-report` | Intern Lead | 41 / 717 | 65% (2458 KB unzipped) | 5 (11) | 2 | 7.7 s | 1.6 s / 7.6 s | 2065 ms | 0.001 | 793 / 30.9 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 6 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-61, M-69 |
+| 69 | `/dashboard/management/manage-interns/intern-report/individual` | Intern Lead | 41 / 715 | 66% (2452 KB unzipped) | 5 (27) | 2 | 7.6 s | 1.6 s / 7.5 s | 1999 ms | 0.078 | 1339 / 38.5 MB | 14 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64, M-61 |
+| 70 | `/dashboard/management/manage-interns/intern-report/team` | Intern Lead | 41 / 715 | 66% (2450 KB unzipped) | 5 (27) | 2 | 7.8 s | 1.6 s / 7.7 s | 1953 ms | 0.021 | 553 / 38.4 MB | 17 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64, M-61 |
+| 71 | `/dashboard/management/manage-interns/leave-reviews` | Intern Lead | 41 / 717 | 66% (2460 KB unzipped) | 5 (9) | 2 | 7.8 s | 1.6 s / 7.8 s | 2099 ms | 0.001 | 794 / 40.2 MB | 13 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 6 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-69 |
+| 72 | `/dashboard/management/manage-interns/minutes` | Intern Lead | 41 / 718 | 66% (2458 KB unzipped) | 7 (20) | 2 | 7.8 s | 1.6 s / 7.7 s | 2093 ms | 0.001 | 1038 / 39.1 MB | 11 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64 |
+| 73 | `/dashboard/management/manage-interns/tasks` | Intern Lead | 42 / 722 | 65% (2480 KB unzipped) | 8 (34) | 2 | 8.3 s | 1.6 s / 8.1 s | 2490 ms | 0.001 | 1158 / 34.8 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, L-58 |
+| 74 | `/dashboard/management/manage-interns/timesheet-reviews` | Intern Lead | 41 / 718 | 66% (2469 KB unzipped) | 5 (9) | 2 | 7.8 s | 1.6 s / 7.8 s | 2165 ms | 0.001 | 750 / 41.2 MB | 13 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 6 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-61, M-69 |
+| 75 | `/dashboard/management/manage-locations` | Admin | 40 / 703 | 64% (2389 KB unzipped) | 5 (8) | 2 | 7.8 s | 1.6 s / 7.8 s | 2165 ms | 0.001 | 718 / 41.2 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 76 | `/dashboard/management/manage-roles` | Admin | 43 / 742 | 66% (2550 KB unzipped) | 5 (9) | 2 | 8.0 s | 1.6 s / 8.1 s | 2268 ms | 0.001 | 1226 / 36.2 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-61 |
+| 77 | `/dashboard/management/manage-users` | Admin | 41 / 709 | 65% (2415 KB unzipped) | 5 (12) | 2 | 7.9 s | 1.6 s / 7.8 s | 2297 ms | 0.001 | 1075 / 33.4 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 78 | `/dashboard/management/mentor-verification` | Admin | 47 / 788 | 67% (2676 KB unzipped) | 8 (16) | 3 | 8.9 s | 1.6 s / 7.6 s | 2194 ms | 0.002 | 975 / 37.1 MB | 16 | redirected to `/dashboard/management/role-verification?`; page requests start only after `user/info` returns; images 437 KB; typing 6 letters in search: 18 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-69 |
+| 79 | `/dashboard/management/notifications` | Admin | 39 / 696 | 65% (2365 KB unzipped) | 5 (20) | 2 | 7.5 s | 1.6 s / 7.5 s | 1883 ms | 0.004 | 1144 / 38.8 MB | 11 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64, M-65 |
+| 80 | `/dashboard/management/organizations` | Admin | 40 / 701 | 66% (2393 KB unzipped) | 4 (2) | 2 | 7.4 s | 1.6 s / 7.5 s | 1880 ms | 0.001 | 579 / 37.7 MB | 29 | images 293 KB | H-39, H-40, H-36, M-64, M-67 |
+| 81 | `/dashboard/management/organizations/affiliation` | Admin | 41 / 717 | 65% (2441 KB unzipped) | 5 (9) | 2 | 8.0 s | 1.6 s / 8.1 s | 2297 ms | 0.001 | 994 / 36.2 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-61 |
+| 82 | `/dashboard/management/organizations/departments` | Admin | 41 / 717 | 65% (2441 KB unzipped) | 5 (4) | 2 | 7.8 s | 1.6 s / 7.9 s | 2034 ms | 0.001 | 724 / 42.3 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, L-58 |
+| 83 | `/dashboard/management/organizations/list` | Admin | 41 / 717 | 65% (2441 KB unzipped) | 5 (3) | 2 | 7.8 s | 1.6 s / 7.9 s | 2105 ms | 0.001 | 608 / 44.1 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, L-58 |
+| 84 | `/dashboard/management/organizations/transfer` | Admin | 41 / 717 | 66% (2441 KB unzipped) | 4 (2) | 2 | 7.6 s | 1.6 s / 7.7 s | 1941 ms | 0.001 | 532 / 38.7 MB | 13 | images 293 KB | H-39, H-40, H-36, M-64 |
+| 85 | `/dashboard/management/organizations/verify` | Admin | 47 / 788 | 67% (2676 KB unzipped) | 5 (6) | 3 | 9.0 s | 1.6 s / 7.7 s | 2427 ms | 0.001 | 836 / 36.4 MB | 16 | redirected to `/dashboard/management/role-verification?`; page requests start only after `user/info` returns; images 437 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 86 | `/dashboard/management/role-verification` | Admin | 43 / 742 | 65% (2521 KB unzipped) | 8 (16) | 2 | 7.8 s | 1.6 s / 7.8 s | 2137 ms | 0.002 | 970 / 36.4 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 18 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-69 |
+| 87 | `/dashboard/management/session-verification` | Admin | 40 / 706 | 64% (2401 KB unzipped) | 8 (35) | 2 | 8.1 s | 1.6 s / 7.9 s | 2378 ms | 0.002 | 870 / 33.9 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 24 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-61, M-69 |
+| 88 | `/dashboard/management/system` | Admin | 39 / 696 | 65% (2373 KB unzipped) | 4 (2) | 2 | 7.3 s | 1.6 s / 7.4 s | 1801 ms | 0.001 | 556 / 37.5 MB | 26 | images 293 KB | H-39, H-40, H-36, M-64, M-67 |
+| 89 | `/dashboard/management/system/features` | Admin | 40 / 698 | 65% (2371 KB unzipped) | 5 (3) | 2 | 7.5 s | 1.6 s / 7.6 s | 1961 ms | 0.001 | 528 / 37.2 MB | 17 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64 |
+| 90 | `/dashboard/management/tasks` | Admin | 39 / 696 | 65% (2376 KB unzipped) | 4 (2) | 2 | 7.2 s | 1.6 s / 7.4 s | 1748 ms | 0.001 | 574 / 37.4 MB | 28 | images 293 KB | H-39, H-40, H-36, M-64, M-67 |
+| 91 | `/dashboard/management/tasks/bulk-import` | Admin | 41 / 715 | 66% (2435 KB unzipped) | 4 (2) | 2 | 7.8 s | 1.6 s / 7.9 s | 2104 ms | 0.001 | 517 / 35.4 MB | 11 | images 293 KB | H-39, H-40, H-36, M-64 |
+| 92 | `/dashboard/management/tasks/create` | Admin | 41 / 715 | 64% (2435 KB unzipped) | 11 (78) | 2 | 8.6 s | 1.6 s / 8.1 s | 3394 ms | 0.009 | 1114 / 44.9 MB | 13 | page requests start only after `user/info` returns; images 437 KB | H-39, H-40, H-36, M-64, M-65 |
+| 93 | `/dashboard/management/tasks/list` | Admin | 41 / 715 | 65% (2435 KB unzipped) | 5 (20) | 2 | 8.0 s | 1.6 s / 7.9 s | 2287 ms | 0.001 | 1381 / 33.7 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 94 | `/dashboard/management/tasks/task-type` | Admin | 41 / 715 | 65% (2435 KB unzipped) | 5 (12) | 2 | 7.9 s | 1.6 s / 7.8 s | 2129 ms | 0.001 | 1010 / 44.2 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, L-58 |
+| 95 | `/dashboard/management/tasks/task-verification` | Admin | 41 / 715 | 65% (2435 KB unzipped) | 5 (3) | 2 | 7.7 s | 1.6 s / 7.8 s | 2018 ms | 0.001 | 620 / 43.6 MB | 13 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 96 | `/dashboard/management/user-management` | Admin | 40 / 701 | 66% (2390 KB unzipped) | 4 (2) | 2 | 7.6 s | 1.6 s / 7.6 s | 2059 ms | 0.001 | 553 / 37.6 MB | 27 | images 293 KB | H-39, H-40, H-36, M-64, M-67 |
+| 97 | `/dashboard/management/verification` | Admin | 39 / 696 | 66% (2371 KB unzipped) | 4 (2) | 2 | 7.5 s | 1.6 s / 7.6 s | 2023 ms | 0.001 | 542 / 37.5 MB | 24 | images 293 KB | H-39, H-40, H-36, M-64, M-67 |
+| 98 | `/dashboard/management/weekly-twitches` | Admin | 43 / 736 | 65% (2529 KB unzipped) | 6 (46) | 2 | 8.2 s | 1.6 s / 8.0 s | 2220 ms | 0.001 | 879 / 38.0 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-60 |
+| 99 | `/dashboard/mentor` | Admin | 45 / 832 | 68% (2907 KB unzipped) | 9 (45) | 2 | 9.0 s | 1.8 s / 9.0 s | 2464 ms | 0.006 | 851 / 38.5 MB | 49 | redirected to `/dashboard`; page requests start only after `user/info` returns; images 437 KB | H-39, H-40, H-36, M-64, H-37, M-60, M-67 |
+| 100 | `/dashboard/mentor/mentees` | Mentor | 39 / 700 | 65% (2381 KB unzipped) | 6 (4) | 2 | 7.5 s | 1.6 s / 7.5 s | 1929 ms | 0.006 | 500 / 37.9 MB | 13 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 0 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 101 | `/dashboard/mentor/opportunities` | Admin | 45 / 832 | 68% (2907 KB unzipped) | 9 (45) | 2 | 8.7 s | 1.7 s / 8.9 s | 2219 ms | 0.007 | 851 / 37.2 MB | 49 | redirected to `/dashboard`; page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64, H-37, M-60, M-67 |
+| 102 | `/dashboard/mentor/sessions` | Mentor | 40 / 713 | 65% (2439 KB unzipped) | 8 (4) | 2 | 8.0 s | 1.6 s / 8.1 s | 2285 ms | 0.003 | 507 / 34.9 MB | 13 | page requests start only after `user/info` returns; images 305 KB | H-39, H-40, H-36, M-64 |
+| 103 | `/dashboard/mentor/task-requests` | Mentor | 39 / 701 | 65% (2386 KB unzipped) | 12 (24) | 2 | 7.8 s | 1.6 s / 7.7 s | 2051 ms | 0.002 | 561 / 39.5 MB | 11 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64, L-58 |
+| 104 | `/dashboard/mujourney` | Student | 40 / 703 | 65% (2390 KB unzipped) | 6 (24) | 2 | 7.7 s | 1.6 s / 7.1 s | 1727 ms | 0 | 1008 / 46.3 MB | 15 | page requests start only after `user/info` returns; duplicate calls: api/v1/dashboard/profile/user-profile/ ×2; typing 6 letters in search: 0 API call(s), 0 server round trip(s) | H-39, H-40, L-65, H-36, M-64 |
+| 105 | `/dashboard/mujourney/[muid]` | Student | 40 / 703 | 65% (2390 KB unzipped) | 5 (15) | 2 | 7.6 s | 1.6 s / 7.1 s | 1497 ms | 0.001 | 973 / 36.1 MB | 15 | page requests start only after `user/info` returns | H-39, H-40, H-36, M-64, L-56 |
+| 106 | `/dashboard/muverse` | Comic Admin | 39 / 696 | 66% (2364 KB unzipped) | 4 (2) | 2 | 7.4 s | 1.6 s / 7.6 s | 1909 ms | 0.001 | 444 / 36.6 MB | 13 | images 293 KB | H-39, H-40, H-36, M-64 |
+| 107 | `/dashboard/profile` | Student | 44 / 780 | 64% (2693 KB unzipped) | 12 (91) | 3 | 9.3 s | 1.6 s / 8.9 s | 2359 ms | 0.001 | 1206 / 42.8 MB | 14 | page requests start only after `user/info` returns; images 571 KB; third-party: quickchart.io | H-39, H-40, H-36, M-64, M-65, L-56, M-60 |
+| 108 | `/dashboard/projects` | Student | 40 / 715 | 65% (2432 KB unzipped) | 5 (16) | 2 | 7.8 s | 1.6 s / 7.7 s | 1975 ms | 0.004 | 834 / 40.8 MB | 14 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 1 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 109 | `/dashboard/reports` | Student | 39 / 697 | 65% (2366 KB unzipped) | 4 (4) | 2 | 7.5 s | 1.6 s / 7.6 s | 1941 ms | 0.001 | 477 / 36.8 MB | 13 | images 293 KB | H-39, H-40, H-36, M-64 |
+| 110 | `/dashboard/search` | Admin | 78 / 1402 | 67% (4775 KB unzipped) | 4 (2) | 1 | 7.4 s | 1.6 s / 2.0 s | 1348 ms | 0 | 459 / 72.0 MB | 5 | redirected to `/dashboard/search/students`; 4 call(s) repeated after load: api/v1/dashboard/profile/user-level-feed/, api/v1/dashboard/profile/user-profile/, api/v1/dashboard/user/info/; images 294 KB; typing 6 letters in search: 1 API call(s), 6 server round trip(s) | H-39, H-40, H-36, M-64, M-69 |
+| 111 | `/dashboard/search/campuses` | Student | 40 / 707 | 64% (2414 KB unzipped) | 6 (5) | 2 | 7.9 s | 1.6 s / 7.2 s | 1749 ms | 0.001 | 488 / 40.0 MB | 18 | page requests start only after `user/info` returns; typing 6 letters in search: 2 API call(s), 6 server round trip(s) | H-39, H-40, H-36, M-64, L-58, M-69 |
+| 112 | `/dashboard/search/mentors` | Student | 40 / 707 | 66% (2414 KB unzipped) | 5 (5) | 2 | 7.6 s | 1.6 s / 7.0 s | 1527 ms | 0.001 | 462 / 33.1 MB | 18 | page requests start only after `user/info` returns; typing 6 letters in search: 1 API call(s), 6 server round trip(s) | H-39, H-40, H-36, M-64, M-69 |
+| 113 | `/dashboard/search/students` | Student | 40 / 707 | 65% (2414 KB unzipped) | 5 (17) | 2 | 7.9 s | 1.6 s / 7.2 s | 1755 ms | 0 | 1017 / 40.9 MB | 42 | page requests start only after `user/info` returns; typing 6 letters in search: 1 API call(s), 6 server round trip(s) | H-39, H-40, H-36, M-64, M-67, M-69 |
+| 114 | `/dashboard/sessions` | Mentor | 39 / 708 | 65% (2416 KB unzipped) | 7 (5) | 2 | 7.5 s | 1.6 s / 7.6 s | 1965 ms | 0.002 | 511 / 39.4 MB | 11 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64 |
+| 115 | `/dashboard/settings` | Student | 38 / 694 | 65% (2368 KB unzipped) | 4 (4) | 2 | 7.4 s | 1.6 s / 7.5 s | 1874 ms | 0.001 | 472 / 37.0 MB | 20 | images 293 KB | H-39, H-40, H-36, M-64, M-67 |
+| 116 | `/dashboard/settings/account` | Student | 39 / 697 | 65% (2370 KB unzipped) | 4 (4) | 2 | 7.5 s | 1.6 s / 7.6 s | 2010 ms | 0.001 | 468 / 37.3 MB | 13 | images 293 KB | H-39, H-40, H-36, M-64 |
+| 117 | `/dashboard/settings/organization` | Campus Lead | 39 / 697 | 65% (2369 KB unzipped) | 6 (8) | 2 | 7.5 s | 1.6 s / 7.5 s | 1966 ms | 0.001 | 477 / 37.4 MB | 13 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, L-58 |
+| 118 | `/dashboard/talent-pool` | Company | 41 / 742 | 66% (2560 KB unzipped) | 10 (160) | 3 | 9.4 s | 1.6 s / 8.0 s | 2473 ms | 0.004 | 1390 / 40.7 MB | 23 | page requests start only after `user/info` returns; images 437 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-60, M-65, M-63, M-67 |
+| 119 | `/dashboard/url-shortener` | Admin | 39 / 699 | 64% (2373 KB unzipped) | 5 (22) | 2 | 7.8 s | 1.6 s / 7.8 s | 2206 ms | 0.001 | 1199 / 40.9 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 120 | `/dashboard/url-shortener/[id]/analytics` | Admin | 44 / 735 | 63% (2493 KB unzipped) | 5 (4) | 2 | 7.7 s | 1.6 s / 7.8 s | 2245 ms | 0.043 | 693 / 43.3 MB | 13 | page requests start only after `user/info` returns; images 293 KB | H-39, H-40, H-36, M-64 |
+| 121 | `/dashboard/weekly-twitches` | Student | 42 / 735 | 66% (2526 KB unzipped) | 5 (12) | 2 | 7.9 s | 1.6 s / 7.9 s | 1984 ms | 0.001 | 684 / 32.6 MB | 11 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 6 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64, M-69 |
+| 122 | `/dashboard/zonal` | Zonal Lead | 41 / 726 | 65% (2463 KB unzipped) | 9 (5) | 2 | 7.9 s | 1.6 s / 7.8 s | 2064 ms | 0.098 | 640 / 31.9 MB | 13 | page requests start only after `user/info` returns; images 293 KB; typing 6 letters in search: 1 API call(s), 0 server round trip(s) | H-39, H-40, H-36, M-64 |
+| 123 | `/forgot-password` | Anonymous | 22 / 357 | 68% (1211 KB unzipped) | 0 (0) | 0 | — | 1.5 s / 1.5 s | 447 ms | 0 | 98 / 12.7 MB | 4 | — | — |
+| 124 | `/login` | Anonymous | 24 / 375 | 68% (1257 KB unzipped) | 0 (0) | 0 | — | 1.6 s / 1.6 s | 413 ms | 0 | 120 / 13.3 MB | 10 | — | — |
+| 125 | `/onboarding/interests` | Admin | 72 / 1262 | 81% (4258 KB unzipped) | 1 (0) | 1 | 4.4 s | 1.6 s / 10.8 s | 1979 ms | 0.01 | 663 / 41.6 MB | 33 | redirected to `/dashboard/management`; 3 call(s) repeated after load: api/v1/dashboard/profile/user-level-feed/, api/v1/dashboard/profile/user-profile/, api/v1/notification/unread-count/; images 443 KB | H-40, M-67 |
+| 126 | `/onboarding/organization` | Student | 52 / 884 | 87% (3009 KB unzipped) | 3 (5) | 1 | 4.0 s | 1.6 s / 1.6 s | 346 ms | 0 | 126 / 12.5 MB | 1 | — | L-58 |
+| 127 | `/profile/[muid]` | Student | 42 / 756 | 65% (2606 KB unzipped) | 11 (62) | 2 | 8.6 s | 1.6 s / 8.8 s | 2047 ms | 0.001 | 1190 / 44.3 MB | 11 | images 427 KB | H-40, H-36, M-64, M-65, L-56, M-60 |
+| 128 | `/register` | Anonymous | 24 / 385 | 67% (1287 KB unzipped) | 4 (18) | 1 | 4.6 s | 1.6 s / 1.6 s | 443 ms | 0 | 130 / 11.8 MB | 4 | — | L-58, M-65 |
+| 129 | `/reset-password` | Anonymous | 24 / 375 | 69% (1258 KB unzipped) | 0 (0) | 0 | — | 1.6 s / 1.6 s | 590 ms | 0 | 94 / 12.9 MB | 8 | — | — |
