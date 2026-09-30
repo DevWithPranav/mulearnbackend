@@ -1,12 +1,13 @@
-# muLearn Dashboard + Backend — Production Audit Report
+# muLearn Dashboard + Backend + Auth Server — Production Audit Report
 
 | Item | Value |
 |---|---|
-| Date | 2026-09-30 |
+| Date | 2026-09-30 (auth server section added the same day) |
 | Dashboard repo / branch | `DevWithPranav/mulearn-dashboard` @ `dev` (`50c7052`, 2026-09-25) |
 | Backend repo / branch | `DevWithPranav/mulearnbackend` @ `pranav-dev` (`ad02b2a`, 2026-09-16) |
 | Backend comparison base | `dev` (`c4a8536`). `pranav-dev` is 194 commits ahead: 137 files, +11,525 / −3,752 lines |
-| Scope | Full regression + production audit, with focus on the dashboard ⇄ backend integration |
+| Auth server repo / branch | `DevWithPranav/authserver` @ `dev` (`c749e90`, 2026-07-17). Unmerged branch `feat/new-auth` (`b790491`, 2026-09-24) was checked for fixes only |
+| Scope | Full regression + production audit, with focus on the dashboard ⇄ backend ⇄ auth server integration |
 
 ---
 
@@ -19,19 +20,23 @@
 5. **Flow tracing.** Every important flow was read end to end: UI → API function → URL → backend view → auth/role → serializer → DB → response → UI handling.
 6. **Branch diff.** The `dev..pranav-dev` diff, the commit log and the backend route list of both branches were compared.
 7. **Dashboard checks run:** `typecheck` passes. `lint` passes (50 warnings). **Unit tests fail: 14 failed / 253 passed, 3 failing files** (see H-17).
+8. **Auth server review.** The whole `authserver` `dev` branch was read (`muauth/views.py`, `utils/views.py`, models, settings; about 1,800 lines). The auth server issues every JWT that the dashboard and backend trust. Its routes (`/api/v1/auth/user-authentication/`, `request-otp/`, `get-access-token/`, `logout/`, `signin-with-google/`, `google/login/callback/`, `google-mobile/`, `apple-mobile/`, `token-verification/<id>/`, `iedc-login/` …) are the ones the dashboard calls. `feat/new-auth` was only checked to see which findings it already fixes.
 
-**Limits.** The backend was not run against a real MySQL database. The external auth service (`AUTH_DOMAIN`, which issues the JWTs) is not in either repo, so any claim about what it puts in the token is marked "needs confirmation". Infra (Netlify, reverse proxy, nginx limits) is not in the repos. Where a finding depends on infra, the report says so.
+**Limits.** The backend and auth server were not run against a real MySQL database. Infra (Netlify, reverse proxy / nginx rules that send `/api/v1/auth/*` to the auth server, upload limits) is not in the repos. Where a finding depends on infra, the report says so.
 
 ---
 
 ## 1. Executive summary
 
-The two branches **are not ready for production together**.
+The three branches **are not ready for production together**.
 
-Most of the day-to-day wiring is correct: about 90% of the dashboard's API calls (603 of 673) reach an existing backend route with the right HTTP method, and the response envelope (`hasError / statusCode / message / response`) is handled the same way everywhere. Recent work added good things too: company-owner job approval, event publish policy, atomic learning-circle lead transfer, and URL-scheme checks on events.
+Most of the day-to-day wiring is correct: about 90% of the dashboard's API calls (603 of 673) reach an existing backend route with the right HTTP method. The remaining auth calls exist on the auth server. The response envelope (`hasError / statusCode / message / response`) is handled the same way everywhere. Recent work added good things too: company-owner job approval, event publish policy, atomic learning-circle lead transfer, and URL-scheme checks on events.
 
-But the audit found problems in four areas that block a safe release:
+But the audit found problems in five areas that block a safe release:
 
+0. **Anyone can become an admin or log in as any user (auth server).** These are the most serious findings:
+   - The auth server puts **every** role link into the JWT, including roles that were requested but never approved. The backend lets anyone request any role at sign-up, including "Admins". So a new account gets full Admin power on its first login (C-09).
+   - The Apple mobile sign-in does not check the Apple token signature. Anyone can get tokens for **any user's email**, including admins (C-08).
 1. **Open admin actions on the backend (Security).** Some endpoints that change important data have no login check or no role check:
    - Anyone on the internet can merge and **delete any organization** (`/organisation/transfer/`) and can **replace any user's profile picture**.
    - Any logged-in learner can **create, grant and revoke achievements**, and can **approve organization requests**.
@@ -57,25 +62,25 @@ But the audit found problems in four areas that block a safe release:
 
 | Severity | Count |
 |---|---|
-| Critical | 7 |
-| High | 17 |
-| Medium | 24 |
+| Critical | 9 |
+| High | 19 |
+| Medium | 28 |
 | Low | 9 |
 
 ### Top 10 to fix first
 
 | # | ID | Fix |
 |---|---|---|
-| 1 | C-01 | Add auth + Admin role to `organisation/transfer/` (or remove it) |
-| 2 | C-03 | Profile picture upload: require auth, use the user id from the JWT |
-| 3 | C-02 | Add Admin role checks to all achievement admin endpoints |
-| 4 | C-04 | Launchpad: stop trusting `current_user` from the request body |
-| 5 | C-06 / C-07 | Commit and run the missing migration; update dashboard role suffix checks |
-| 6 | C-05 | Build a real file upload for company verification documents |
-| 7 | H-01 / H-14 | Role checks on org verification; restrict self-assignable roles; return only verified, active roles in `user/info` |
-| 8 | H-04 / H-05 | Fix the notification feed contract (links, source, broadcasts) and add or remove the admin broadcast endpoint |
-| 9 | H-08 | Remove the `request.body` read in the middleware, or raise the upload limits to match the product |
-| 10 | H-10 / H-09 | Stop karma farming; block self-approval of events |
+| 1 | C-09 | Auth server: only `verified=True` roles in tokens. Backend: only a short allowlist of roles can be requested at sign-up |
+| 2 | C-08 | Auth server: verify Apple identity tokens against Apple's public keys (already done on `feat/new-auth`; ship it), or turn off `apple-mobile/` now |
+| 3 | C-01 | Add auth + Admin role to `organisation/transfer/` (or remove it) |
+| 4 | C-03 | Profile picture upload: require auth, use the user id from the JWT |
+| 5 | C-02 | Add Admin role checks to all achievement admin endpoints |
+| 6 | C-04 | Launchpad: stop trusting `current_user` from the request body |
+| 7 | H-18 / H-19 | Backend: reject refresh tokens used as access tokens. Auth server: fix brute-force protection and remove the IEDC password oracle |
+| 8 | C-06 / C-07 | Commit and run the missing migration; update dashboard role suffix checks |
+| 9 | C-05 | Build a real file upload for company verification documents |
+| 10 | H-01 / H-04 / H-08 | Role checks on org verification; notification feed contract; upload size limit |
 
 ---
 
@@ -228,6 +233,53 @@ But the audit found problems in four areas that block a safe release:
   - Dashboard: accept `" CampusIGLead"` and `" CampusIGCoLead"`, and keep `" CampusLead"` during the migration window.
   - Backend: decide whether co-leads can create or manage events, and add that to `_can_create_event` and `decide_publish_status`.
 - **Impact.** Campus IG event work is blocked for all campus chapters.
+
+### C-08 · Apple mobile sign-in does not check the token signature, so anyone can log in as any user
+
+| Field | Detail |
+|---|---|
+| Severity | **Critical** |
+| Category | Security (account takeover) |
+| Repository / branch | authserver @ `dev` (fixed on unmerged `feat/new-auth`). Also reachable through the backend proxy on `pranav-dev` |
+| Location | Auth server `muauth/views.py:986-1069` — `AppleMobileAuthAPIView.post` (`jwt.decode(identity_token, options={"verify_signature": False})`, then falls back to `request.data.get("email")`); route `POST /api/v1/auth/apple-mobile/`. Same unverified decode in `AppleLoginCallbackAPIView` (L915). Backend `api/auth/auth_views.py` `AppleMobileAuthProxyAPI` forwards `identity_token` and `email` unchanged. |
+| Related dependency | Every system that trusts auth-server JWTs: backend, dashboard, mobile apps |
+
+- **Problem.** The view decodes the "Apple" token without checking who signed it, and it does not check `iss`, `aud` or `exp`. If the token has no email, it takes the email from the request body. It then finds the user by email and returns a fresh access token and a 7-day refresh token. `APPLE_CLIENT_ID` is not needed for this path.
+- **Why it matters.** A person can forge a JWT with any email (for example an admin's) and receive that user's tokens. This is a full account takeover with no password, OTP or Apple account needed.
+- **Expected.** Verify the token with Apple's public keys (`https://appleid.apple.com/auth/keys`), and check `iss = https://appleid.apple.com`, `aud = <our client id>` and `exp`. Take the email only from the verified token.
+- **Current.** Any JWT-shaped string is accepted.
+- **Reproduce.** `POST /api/v1/auth/apple-mobile/` with `{"identity_token":"<any unsigned JWT>","email":"<victim email>"}` → `accessToken` + `refreshToken` for the victim. (Do not run this against production.)
+- **Fix.**
+  - Merge the `verify_apple_identity_token` fix from `feat/new-auth` into `dev` and deploy it.
+  - Until then, turn off `apple-mobile/` and `apple/login/callback/` on the auth server and the backend proxy.
+  - Rotate the JWT secret afterwards if logs show suspicious Apple logins.
+- **Impact.** Any account can be taken over, including every Admin.
+
+### C-09 · A new account can make itself Admin: tokens include roles that were never approved
+
+| Field | Detail |
+|---|---|
+| Severity | **Critical** |
+| Category | Security / RBAC / Cross-repo |
+| Repository / branch | authserver @ `dev` + Backend @ `pranav-dev` + Dashboard @ `dev` |
+| Location | Auth server `utils/views.py:64` `generate_jwt` and `muauth/views.py:564` `GetAccessToken.post` both use `UserRoleLink.objects.filter(user=user)` with **no `verified=True` filter** (the unused `generate_access_token` in `utils/views.py` has the filter; `feat/new-auth` still has the bug). Backend `api/register/serializers.py:302` accepts any role ID at sign-up (`queryset=Role.objects.all()`) and saves it with `verified=False`. `api/register/register_views.py:233` `GET /register/role/list/` publicly lists every role, including "Admins", with its ID. Backend `utils/permission.py` `role_required` trusts JWT roles. Backend `dash_user_serializer.py:80` `get_roles` also returns unapproved roles. |
+| Related dependency | Dashboard proxy (JWT roles), `usePermissions` and server `requireRole` (roles from `user/info`) |
+
+- **Problem.** Role requests are stored as unverified `UserRoleLink` rows and wait in the admin verification queue. But the auth server puts every link into the token, so the requested role works at once everywhere.
+- **Why it matters.** Anyone can sign up with `role = <Admins id>` (or "Campus Lead", "Enabler", "Mentor", …). On the first login they are a full admin in the backend, in the edge proxy and in the dashboard. This is complete platform takeover by self-service.
+- **Expected.** Tokens and `user/info` contain only approved, active roles. Sign-up only allows a small list of self-service roles.
+- **Current.** Unapproved roles are treated as real roles.
+- **Reproduce.**
+  1. `GET /api/v1/register/role/list/` → find the ID of "Admins".
+  2. `POST /api/v1/register/` with `user.role = <that id>`.
+  3. Log in → decode the access token → `roles` contains `"Admins"`.
+  4. Call any `@role_required([ADMIN])` endpoint → it succeeds.
+  (Do not run this against production.)
+- **Fix.**
+  - Auth server: filter `verified=True` in `generate_jwt` and `GetAccessToken` (and skip revoked or inactive links once the auth server model has those columns).
+  - Backend: add an allowlist for self-requested roles in `UserSerializer`, and filter `verified=True, is_active=True` in `user/info`.
+  - Check for accounts that already have unverified privileged role links and remove them.
+- **Impact.** Total loss of access control.
 
 ---
 
@@ -419,19 +471,8 @@ But the audit found problems in four areas that block a safe release:
 - **Fix.** Add a "Pending approval" tab on company jobs with approve / reject / request-changes, and fix the notification URL.
 - **Impact.** The company-mentor hiring flow does not work.
 
-### H-14 · Anyone can request any role at sign-up; `user/info` returns unverified roles as real roles
-| Field | Detail |
-|---|---|
-| Severity / Category | High · Security / RBAC (Critical if the auth service puts unverified roles in the JWT — **needs confirmation**) |
-| Repo / branch | Backend @ `pranav-dev` + Dashboard @ `dev` |
-| Location | Backend `api/register/serializers.py:302` (`role = PrimaryKeyRelatedField(queryset=Role.objects.all())`), `register_views.py:233` (`GET /register/role/list/` lists every role, including "Admins", with IDs), `api/dashboard/user/dash_user_serializer.py:80` `UserSerializer.get_roles` (all links; ignores `verified`, `is_active`, `revoked_at`). Dashboard `src/hooks/use-permissions.ts:81-84` (roles from `user/info`), `src/lib/auth/server.ts` `requireRole` (used by 43 server pages). |
-
-- **Problem.**
-  - A user can register with `role=<Admins id>`. A link with `verified=False` is created and shows up in the admin verification queue.
-  - `user/info` returns `"Admins"` in `roles`, so the dashboard shows management nav, and **server-side `requireRole` lets the user in** (only the edge proxy, which reads JWT roles, may stop them).
-- **Expected.** Only a short allowlist can be self-requested (Student, Mentor, Enabler, Company …). `user/info` returns only verified, active roles (and optionally a separate `pending_roles`).
-- **Fix.** Add an allowlist in the register serializer. Filter `verified=True, is_active=True` in `get_roles`. Confirm the auth service filters the same way.
-- **Impact.** Privilege-escalation risk. Admin UI can leak to unverified users.
+### H-14 · (Moved to C-09)
+This item was first marked "High, needs confirmation", because the auth server was not yet reviewed. The auth server review confirmed that tokens include unapproved roles, so it is now **C-09 (Critical)**.
 
 ### H-15 · Unauthenticated integration proxies use server secrets
 | Field | Detail |
@@ -468,6 +509,57 @@ But the audit found problems in four areas that block a safe release:
   - Delete or convert the two broken test files.
   - Add `bunx vitest run` to CI.
   - Add `pytest` with a MySQL service to the backend CI.
+
+### H-18 · The backend accepts a refresh token as an access token
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Security / Cross-repo |
+| Repo / branch | Backend @ `pranav-dev` + authserver @ `dev` |
+| Location | Backend `utils/permission.py` `JWTUtils.is_jwt_authenticated` (checks signature, `id` and `expiry` only; never checks `tokenType`). Auth server `utils/views.py:64` `generate_jwt` signs access and refresh tokens with the same key and the same claims (`id`, `muid`, `roles`, `expiry`), only `tokenType` differs. |
+
+- **Problem.** A refresh token (valid 7 days) works as a Bearer token on every backend endpoint.
+- **Why it matters.**
+  - The roles inside it are frozen at login time for 7 days, so a revoked admin keeps admin power for a week.
+  - Logout does not help: the auth server's global logout only blocks the refresh endpoint, and the backend never checks it.
+  - The dashboard keeps the refresh token in a JavaScript-readable cookie (M-23), so any XSS gives a 7-day admin credential.
+- **Expected.** The backend accepts only `tokenType == "access"`.
+- **Fix.** In `is_jwt_authenticated`, reject tokens where `tokenType != "access"`. Stop putting `roles` into refresh tokens.
+- **Impact.** Revocation and logout do not work for anyone holding a refresh token.
+
+### H-19 · Password and OTP guessing is not properly limited; the IEDC login is an open password oracle
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Security |
+| Repo / branch | authserver @ `dev` (OTP code unchanged on `feat/new-auth`) |
+| Location | `muauth/views.py:25-173` `UserAuthenticationAPI.post`, `:660` `RequestMuidOtp.post`, `:696` `IedcLogin.post` |
+
+- **Problem.**
+  1. **IEDC login has no limit and leaks the answer.** `POST /api/v1/auth/iedc-login/` checks the password with no attempt limit and no log. A wrong password returns 400 "Invalid password". A correct password crashes with HTTP 500, because the code reads `user.fullname` (the field is `full_name`). So the status code tells an attacker when a guess is right, with no lockout. It also says "Invalid muid or mails" for unknown users (account enumeration).
+  2. **Lockout is per typed identifier.** The main login locks after 5 failures in 30 minutes, keyed on the exact `emailOrMuid` string. Email and muid are separate counters for the same user.
+  3. **Weak OTP.** `random.randint(0, 99999)` gives only 100,000 values (the first digit is always 0), from a non-secure random generator. Old OTPs are not deleted when a new one is requested, so several can be valid at once. The check `OtpVerification.objects.filter(otp=otp).first()` looks up by OTP value across **all** users, so two users with the same OTP can block each other.
+  4. `request-otp/` has no rate limit (email flooding) and returns "Invalid muid or email" for unknown users (account enumeration).
+- **Expected.** One limiter per **user** for every login route, a secure 6-digit OTP (`secrets.randbelow(10**6)`), one active OTP per user, looked up by user and OTP together, and the same response for known and unknown accounts.
+- **Fix.**
+  - Remove or fix `iedc-login` (use `full_name`, add the same limiter, and return tokens or nothing).
+  - Key the limiter on `user.id` after lookup, plus a per-IP limit.
+  - Rewrite OTP creation and lookup as above.
+  - Rate-limit `request-otp`.
+- **Impact.** Accounts with weak passwords can be taken over. Users can be flooded with OTP emails.
+
+### H-20 · Every login waits on a third-party IP lookup with no timeout; a failure breaks login
+| Field | Detail |
+|---|---|
+| Severity / Category | High · Reliability / Privacy |
+| Repo / branch | authserver @ `dev` |
+| Location | `utils/views.py` `CustomHTTPHandler.get_location` (`requests.get("https://ipinfo.io/<ip>/json")` with no timeout and no error handling) and `get_user_agent` (which may fail when there is no User-Agent header), called by `get_user_info` at the start of password, OTP and Google logins |
+
+- **Problem.**
+  - If ipinfo.io is slow, every login hangs. If it is down, rate-limited or returns non-JSON, the exception is not caught and login returns HTTP 500.
+  - It uses `REMOTE_ADDR`, which behind the reverse proxy is the proxy's IP. So the saved location is wrong anyway.
+  - Each user's IP is sent to a third party.
+- **Expected.** Login never depends on analytics.
+- **Fix.** Log login attempts without the lookup (or enrich them later in a background job). Use a short timeout and catch all errors. Use the client IP from `X-Forwarded-For`, as `get_client_ip_address` already does.
+- **Impact.** An ipinfo.io outage takes down all logins.
 
 ---
 
@@ -614,6 +706,36 @@ Format: **ID · Title** — Severity · Category · Repo @ branch · Location �
 - *Current:* The column is always "-" and the schema check fails (it is lenient, so only a log).
 - *Fix:* Remove the column (the field was removed for privacy).
 
+**M-25 · Google sign-in: redirect list, missing `state`, no audience check** — Medium · Security/Cross-repo · authserver @ dev · `muauth/views.py:202-207` `ALLOWED_GOOGLE_REDIRECT_URIS`, `:236` `GoogleLoginAPIView`, `:379` `GoogleMobileAuthAPIView`; Dashboard `src/features/auth/api/auth.api.ts:160-190` (redirect URI = `window.location.origin + "/callback/"`).
+- *Problems:*
+  - The list has `https://app.mulearn.org/`, `https://dev.mulearn.org/`, `http://localhost:3000/` and `https://mulearn-dashboard.vercel.app/`, but **not the staging site `https://staging.app.mulearn.org/`** (named in the dashboard's CONTRIBUTING.md) or Netlify previews. So Google login fails on staging.
+  - `localhost` and a `vercel.app` domain are allowed in production. If muLearn does not own that Vercel project, someone else could receive Google login codes.
+  - No OAuth `state` value is used, so login CSRF is possible (an attacker can log a victim into the attacker's account).
+  - The mobile flow does not check the token's `aud`, so Google ID tokens made for other apps are accepted.
+- *Fix:* Keep a separate redirect list per environment, add staging, and remove dev URLs from prod. Add a `state` value and check it in the callback. Check `aud` against muLearn's client IDs.
+
+**M-26 · Logout and refresh-token handling are weak** — Medium · Security · authserver @ dev · `muauth/views.py:500-657` (`GetAccessToken`, `LogoutAPIView`).
+- *Problems:*
+  - The global-logout check **allows the request when Redis is down**, so logout stops working during a Redis outage.
+  - Refresh tokens are never rotated. The same token is returned on every refresh until it expires 7 days after login.
+  - Roles are copied into the refresh token (see H-18).
+  - The refresh endpoint returns HTTP 400 for every failure. The dashboard only treats 401 or `statusCode 1000` as "session expired". It still logs the user out, because the refresh returns no token, but the error codes (1003/1004) are inconsistent.
+- *Fix:* Rotate refresh tokens and store their `jti` in Redis. Fail closed (or use a database fallback) for logout checks. Keep roles out of refresh tokens.
+
+**M-27 · Auth routing depends on hidden infra; two copies of the auth API** — Medium · Architecture/Cross-repo · Dashboard `src/api/refresh.client.ts`, `refresh.server.ts`, `app/api/auth/logout/route.ts`, `src/api/base-url.server.ts`; Backend `api/auth/auth_views.py`; authserver `muauth/urls.py`.
+- *Problem:* The dashboard calls `/api/v1/auth/*` on `NEXT_PUBLIC_DJANGO_API_URL` and `BACKEND_URL`. Those routes live on the auth server, not in Django. So it works only if a reverse proxy sends `/api/v1/auth/*` to the auth server. The backend also has its own `auth/*` proxy views on the **same paths**, which that routing rule hides. The backend's `user-authentication/` proxy drops `otp`, so OTP login fails if a request ever reaches Django.
+- *Current risk:* `src/api/server.ts` tells ops to point `BACKEND_URL` at an internal (VPC) Django address. If they do, server-side refresh and logout call Django, get 404, and users are logged out on page loads once their 15-minute token expires.
+- *Fix:* Add an explicit `AUTH_URL` (public and server-side) to the dashboard and use it for every `/auth/*` call. Delete the backend proxies, or make them the only path and forward every field. Write down the gateway rule.
+
+**M-28 · Auth server hygiene** — Medium · Security/Ops · authserver @ dev · `authserver/settings.py`, `requirements.txt`, `muauth/views.py`.
+- `CORS_ALLOW_ALL_ORIGINS = True`, and `CorsMiddleware` sits *after* `CommonMiddleware`, so redirects and errors from earlier middleware miss CORS headers.
+- The root logger is at DEBUG and SQL logging goes to files with no rotation.
+- `requirements.txt` is saved as UTF-16 and lists `pytz` twice. `gunicorn` is only installed in the Dockerfile.
+- The protected-key checks use `==` instead of a constant-time compare (`hmac.compare_digest`).
+- There are no tests on `dev`. `feat/new-auth` adds tests and CI.
+- A dead branch in `UserAuthenticationAPI` (`flag_register_*` cache key) skips all brute-force protection. Nothing in the backend sets that key today, but it is a hidden bypass. Remove it.
+- *Fix:* Same hardening as M-22. Merge the tested `feat/new-auth` work after it gets the C-09 and H-19 fixes.
+
 ### Low
 
 **L-01** · Error-log "dismiss" URL has no trailing slash (`src/api/endpoints.ts:1035`). This relies on the APPEND_SLASH 301 redirect for a PATCH (a RuntimeError when DEBUG=True). *Fix:* Add `/`.
@@ -671,11 +793,11 @@ The full chain for every endpoint is: **UI → API function → URL → Django r
 
 | Dashboard call | Method | Backend result | Verdict |
 |---|---|---|---|
-| `auth.login` `/api/v1/auth/user-authentication/` | POST | Django proxy exists but only forwards `emailOrMuid`+`password` | OTP login works only if the gateway routes to the auth service (M-14 / §12) |
-| `auth.requestOTP` `/auth/request-otp/` | POST | No Django route | Needs gateway → auth service |
-| `auth.refreshToken` `/auth/get-access-token/` (client + server refresh) | POST | No Django route (Django has `/auth/refresh-token/` proxy) | Needs gateway; **breaks if `BACKEND_URL` points straight at Django** (§12) |
-| `auth.logout` `/auth/logout/` (route handler) | POST | No Django route | Same as above; errors are swallowed, so the refresh token is never revoked |
-| `auth.signinWithGoogle`, `auth.googleCallback` | GET | No Django route | Same as above |
+| `auth.login` `/api/v1/auth/user-authentication/` | POST | Auth server ✅ (password + OTP). Django also has a proxy on the same path that drops `otp` | Works when the gateway sends `/api/v1/auth/*` to the auth server (M-27) |
+| `auth.requestOTP` `/auth/request-otp/` | POST | Auth server ✅ | Needs the gateway rule; no rate limit, enumeration (H-19) |
+| `auth.refreshToken` `/auth/get-access-token/` (client + server refresh) | POST | Auth server ✅ (Django has a `/auth/refresh-token/` proxy) | Needs the gateway rule; **breaks if `BACKEND_URL` points straight at Django** (M-27) |
+| `auth.logout` `/auth/logout/` (route handler) | POST | Auth server ✅ (global logout by `iat`) | Same routing risk. The route handler swallows errors, so a failed logout is silent. The backend still accepts the old refresh token as a Bearer token (H-18) |
+| `auth.signinWithGoogle`, `auth.googleCallback` | GET | Auth server ✅ | Redirect list has no staging domain; no `state` (M-25) |
 | `register.validate` `/register/validate/` | PUT | No route | Dead code (L-04) |
 | `notifications.list` `/notification/list/` | GET | Matches `DeleteOneView` (DELETE only) → 405 | Dead legacy hook (M-18) |
 | `notifications.deleteOne` `/notification/delete/id/<id>/` | DELETE | Removed | Dead legacy hook (M-18) |
@@ -692,8 +814,8 @@ Legend: ✅ correct · ⚠️ works with a gap · ❌ broken
 
 | Module / flow | Route + method | Auth | Role / ownership | Payload / params | Response handling | Mutation → UI refresh | Verdict |
 |---|---|---|---|---|---|---|---|
-| Login / session | gateway paths | ✅ | n/a | ⚠️ OTP via Django proxy | ✅ envelope | ✅ | ⚠️ (§12) |
-| User info | ✅ `GET user/info/` | ✅ | ⚠️ returns unverified roles | ✅ | ✅ | ✅ | ⚠️ (H-14, M-16) |
+| Login / session (auth server) | ✅ on auth server | ❌ Apple token unverified | ❌ unapproved roles in JWT | ⚠️ OTP via Django proxy | ✅ envelope | ✅ | ❌ (C-08, C-09, H-18, H-19, M-27) |
+| User info | ✅ `GET user/info/` | ✅ | ❌ returns unverified roles | ✅ | ✅ | ✅ | ❌ (C-09, M-16) |
 | Profile picture | ✅ `POST user/profile/update/` | ❌ none | ❌ user from body | ❌ `user_id` | ✅ | ✅ | ❌ (C-03) |
 | Role management | ✅ | ✅ | ✅ Admin | ✅ | ✅ both paginated and array shapes | ✅ | ⚠️ (M-01…M-04) |
 | Role verification (new) | ✅ `GET/PATCH/DELETE user/verification/` | ✅ | ✅ Admin | ❌ `role`, `created_at` ignored | ⚠️ missing `created_at` | ✅ | ❌ (H-07) |
@@ -730,11 +852,11 @@ Legend: ✅ correct · ⚠️ works with a gap · ❌ broken
 ## 6. Business-logic audit
 
 **Users and roles**
-- Role requests at sign-up are not limited (H-14).
+- Role requests at sign-up are not limited, and the auth server puts unapproved roles into tokens, so any new account can become Admin (C-09).
 - System roles can be edited or deleted (M-01).
 - Bulk and single role removal behave differently (M-02).
 - Roles are trusted from the JWT for up to 15 minutes after a change (M-14).
-- `user/info` mixes pending and active roles (H-14).
+- `user/info` mixes pending and active roles (C-09).
 - Company role is granted only on company verification. That is correct, but delegates never get a UI (H-12).
 
 **Organizations**
@@ -801,7 +923,7 @@ Legend: ✅ correct · ⚠️ works with a gap · ❌ broken
 
 **Issues**
 1. **Contract drift is hidden.** Schemas are lenient by default (`strictSchema` is off and mismatches are only logged in development). Many mismatches in this report (H-04, H-07, M-24) fail silently in production. Suggestion: send schema-mismatch events to monitoring in production, and turn on `strictSchema` for critical flows (auth, roles, payments).
-2. **RBAC data source.** The UI uses DB roles from `user/info` (including pending ones), the proxy uses JWT roles, and the backend uses JWT roles. These three sources can disagree (H-14, M-14).
+2. **RBAC data source.** The UI uses DB roles from `user/info` (including pending ones), the proxy uses JWT roles, and the backend uses JWT roles. These three sources can disagree (C-09, M-14).
 3. **Role-name constants are copied by hand from the backend** (C-07). Suggestion: generate them from an API or a shared JSON file.
 4. **Client-side "fallbacks" hide backend gaps:**
    - event status merging (M-11)
@@ -845,6 +967,25 @@ Legend: ✅ correct · ⚠️ works with a gap · ❌ broken
 7. **Logging.** Full request bodies are written to logs on errors (M-22). Root logger at DEBUG with no rotation. `print()` in middleware.
 8. **Tests.** Test modules exist (events, LC, projects), but no CI runs them.
 
+### 8b. Auth server audit (authserver @ dev)
+
+**What it does.** A small Django service (about 1,800 lines) that shares the `user`, `role` and `user_role_link` tables and the `SECRET_KEY` with the backend. It issues HS256 JWTs: access tokens (15 minutes) and refresh tokens (7 days). It handles password login, OTP login, Google (web + mobile), Apple (web + mobile), refresh, global logout, and an internal token issue for Google sign-up.
+
+**Strengths**
+- Suspended users cannot log in or refresh (`ActiveUserManager`).
+- Google web sign-in checks `redirect_uri` against a list.
+- The Google sign-up temp token is short-lived, single-use (`jti` + `cache.add`) and checked with a protected key.
+- Global logout by `iat` is a sensible, cheap design.
+
+**Issues**
+1. Unapproved roles in tokens (C-09).
+2. Apple tokens not verified (C-08). Fixed only on the unmerged `feat/new-auth`.
+3. Refresh and access tokens carry the same claims and key; the backend does not tell them apart (H-18).
+4. Brute-force and OTP weaknesses, including the IEDC oracle (H-19).
+5. Login depends on ipinfo.io (H-20).
+6. Google OAuth gaps (M-25). Refresh/logout weaknesses (M-26). Routing and duplicate proxies (M-27). Config and hygiene (M-28).
+7. `dev` was last changed on 2026-07-17. `feat/new-auth` (2026-09-24, 80 files, +6,677 lines) adds OIDC, tests and the Apple fix, but still has C-09 and the weak OTP. Review it and merge it with those fixes, instead of patching `dev` twice.
+
 ---
 
 ## 9. Security audit
@@ -856,7 +997,12 @@ Legend: ✅ correct · ⚠️ works with a gap · ❌ broken
 | C-03 | Unauthenticated profile picture overwrite | Critical |
 | C-04 | Launchpad identity taken from the request body | Critical |
 | H-01 | Org request approval by any user | High |
-| H-14 | Self-requested privileged roles; unverified roles returned as active | High (Critical if the JWT includes them) |
+| C-09 | Self-requested privileged roles become real roles in the JWT (self-service Admin) | Critical |
+| C-08 | Apple mobile sign-in accepts unsigned tokens (take over any account) | Critical |
+| H-18 | Refresh token accepted as an access token for 7 days; bypasses logout and role changes | High |
+| H-19 | Weak brute-force protection; IEDC login is an unlimited password oracle; weak OTP; OTP email flooding | High |
+| M-25 | Google OAuth: no `state`, no `aud` check, dev/vercel redirect URIs in prod | Medium |
+| M-26 | Logout fails open when Redis is down; refresh tokens never rotated | Medium |
 | H-15 | Unauthenticated VC issuance and connected-user email listing | High |
 | H-10 | Karma farming | High |
 | M-14 | JWT helpers skip the expiry check; role staleness; suspended users | Medium |
@@ -907,6 +1053,7 @@ Other notes:
 | Dashboard job form refactor | `96ae3a7` | Lost backend limits; tests red (H-17) |
 | Dashboard notification + broadcast work | `c4e2b89`…`4ac6876` | Built against endpoints and fields the backend does not provide (H-04, H-05) |
 | Dashboard unified Role Verification | `26a537c`, `ecc91c8` | Depends on an unmerged backend change (H-07) |
+| Auth server `feat/new-auth` (unmerged) | latest `b790491` | Large rewrite (OIDC, account API, internal API). It fixes C-08 and adds tests, but still has C-09 and weak OTP. Merging it changes URL layout (`muauth/urls/*`), so check every dashboard and backend auth call again before release |
 
 ---
 
@@ -922,16 +1069,19 @@ These are cases where each repo looks fine alone but the pair is broken.
 6. **Upload size** — H-08 (dashboard 5–10 MB vs backend 2.5 MB effective).
 7. **Company document upload** — C-05 (the dashboard has no endpoint to call).
 8. **Company delegates** — H-12 (the backend supports them; the dashboard's gating blocks them).
-9. **Auth routing depends on infra.**
-   - The dashboard calls `/api/v1/auth/{request-otp, get-access-token, logout, token-verification, signin-with-google, google/login/callback}` on `NEXT_PUBLIC_DJANGO_API_URL`. Django serves none of these. It has `user-authentication/`, `refresh-token/`, and the mobile proxies.
-   - This only works if a reverse proxy sends `/api/v1/auth/*` to the auth service. If it does, the Django `auth/*` proxies are shadowed.
-   - The server-side refresh (`refresh.server.ts`) and logout (`app/api/auth/logout/route.ts`) use `BACKEND_URL`. `src/api/server.ts` recommends pointing that at an internal VPC endpoint. **If that endpoint is Django, every server refresh fails and users are logged out every 15 minutes.** The logout route swallows the error, so refresh tokens are never revoked.
-   - `loginWithOTP` sends `otp`, but the Django proxy only forwards `password`.
-   - *Fix:* Write down the routing. Point both refresh paths at the same working endpoint (the Django `refresh-token/` proxy or the auth service directly). Add a health check.
+9. **Auth routing depends on infra** — M-27.
+   - The auth routes the dashboard calls (`request-otp`, `get-access-token`, `logout`, `signin-with-google`, `google/login/callback`, `user-authentication`) all exist on the **auth server**. Django serves none of them, except its own proxies for `user-authentication/`, `refresh-token/` and the mobile routes.
+   - So login works only if a reverse proxy sends `/api/v1/auth/*` to the auth server. That rule also hides the Django proxies on the same paths.
+   - The server-side refresh (`refresh.server.ts`) and logout (`app/api/auth/logout/route.ts`) use `BACKEND_URL`. `src/api/server.ts` recommends pointing that at an internal VPC endpoint. **If that endpoint is Django, every server refresh fails and users are logged out on page loads once their 15-minute token expires.** The logout route swallows the error.
+   - `loginWithOTP` sends `otp`. The auth server supports it, but the Django proxy only forwards `password`.
+   - *Fix:* Add an explicit auth base URL to the dashboard for all `/auth/*` calls, write down the gateway rule, and add a health check.
 10. **Deep links from the backend** — M-13.
-11. **Role data sources** — H-14 / M-14 (DB roles in the UI vs JWT roles in proxy and backend).
+11. **Role data sources** — C-09 / M-14 (DB roles in the UI vs JWT roles in proxy and backend; the auth server includes unapproved roles).
 12. **Disabled features** — M-21 (the backend has the endpoints; the dashboard turned them off).
 13. **Removed fields** — M-24.
+14. **Token types** — H-18 (the auth server marks tokens with `tokenType`, but the backend never checks it, so refresh tokens work as access tokens).
+15. **Google redirect list** — M-25 (the dashboard builds the redirect URI from its own origin; the auth server's list has no staging domain).
+16. **Apple sign-in through the backend** — C-08 (the backend's `apple-mobile/` proxy forwards unsigned tokens to the vulnerable auth-server route).
 
 ---
 
@@ -959,11 +1109,12 @@ These are cases where each repo looks fine alone but the pair is broken.
 ## 14. Recommended fixes and priorities
 
 **P0 — before any deploy (1–2 days)**
-1. Lock down open endpoints: C-01, C-02, C-03, C-04, H-01, H-15, the org karma endpoints, L-02. Also set `DEFAULT_PERMISSION_CLASSES` so new views are closed by default.
-2. Commit and dry-run the missing DB scripts (C-06, H-16). Block deploy on a schema check.
-3. Update the dashboard role suffixes for `CampusIGLead` / `CampusIGCoLead` (C-07).
-4. Remove the `request.body` read in the middleware or raise the limits (H-08).
-5. Restrict self-assignable roles. Return only verified, active roles from `user/info` (H-14).
+1. **Auth server, today:** only verified roles in tokens (C-09). Turn off or fix Apple sign-in (C-08; the fix already exists on `feat/new-auth`). Remove the IEDC password oracle and fix the login limiter and OTP (H-19).
+2. **Backend, today:** accept only `tokenType == "access"` (H-18). Allow only a short list of self-requested roles at sign-up, and return only verified, active roles from `user/info` (C-09). Remove unverified privileged role links that already exist. Rotate `SECRET_KEY` (this logs everyone out) if logs show abuse.
+3. Lock down open endpoints: C-01, C-02, C-03, C-04, H-01, H-15, the org karma endpoints, L-02. Also set `DEFAULT_PERMISSION_CLASSES` so new views are closed by default.
+4. Commit and dry-run the missing DB scripts (C-06, H-16). Block deploy on a schema check.
+5. Update the dashboard role suffixes for `CampusIGLead` / `CampusIGCoLead` (C-07).
+6. Remove the `request.body` read in the middleware or raise the limits (H-08).
 
 **P1 — this sprint**
 1. Company document upload (C-05) and re-verify affected companies.
@@ -977,6 +1128,7 @@ These are cases where each repo looks fine alone but the pair is broken.
 9. Restore job form rules. Add tests to CI in both repos (H-17).
 
 **P2 — next sprint**
+- Auth server: login must not depend on ipinfo.io (H-20); Google OAuth `state`, `aud` and redirect lists (M-25); refresh rotation and fail-closed logout (M-26); explicit auth base URL in the dashboard (M-27); auth server hygiene (M-28).
 - Role safety (M-01…M-04).
 - IG request lifecycle (M-08, M-09).
 - Event list performance (M-11).
@@ -1004,7 +1156,8 @@ These are cases where each repo looks fine alone but the pair is broken.
 
 | Area | Status |
 |---|---|
-| Security | ❌ Several unauthenticated or unauthorized write endpoints (C-01…C-04, H-01, H-15) |
+| Authentication (auth server) | ❌ Any account can become Admin (C-09); any account can be taken over through Apple sign-in (C-08); weak brute-force protection (H-19); refresh tokens work as access tokens (H-18) |
+| Security (backend) | ❌ Several unauthenticated or unauthorized write endpoints (C-01…C-04, H-01, H-15) |
 | Data integrity | ❌ Missing migrations (C-06, H-16); destructive cascades (H-11); non-atomic karma (M-17) |
 | Core business rules | ❌ Fake document verification (C-05); karma farming (H-10); self-approval (H-09) |
 | Integration | ❌ At least 10 cross-repo breaks (§12) |
@@ -1015,8 +1168,9 @@ These are cases where each repo looks fine alone but the pair is broken.
 **Release gate.** Ship only when all of these are true:
 1. All Critical and High items are fixed or have an accepted, documented risk.
 2. The DB migration set is committed and rehearsed on a copy of production.
-3. The dashboard `vitest` and backend `pytest` suites run in CI and pass.
-4. A smoke test covers: login/refresh/logout through the real gateway, org verify/reject/merge, company sign-up with a real document, event create → approve → publish for each organiser type, role verification per tab, notification feed with links and broadcasts, and uploads at 4–5 MB.
+3. The dashboard `vitest`, backend `pytest` and auth-server test suites run in CI and pass.
+4. A security test shows that a new account with a requested privileged role gets **no** extra rights, that forged Apple tokens are rejected, and that a refresh token is rejected as a Bearer token.
+5. A smoke test covers: login (password, OTP, Google) / refresh / logout through the real gateway, org verify/reject/merge, company sign-up with a real document, event create → approve → publish for each organiser type, role verification per tab, notification feed with links and broadcasts, and uploads at 4–5 MB.
 
 ---
 
